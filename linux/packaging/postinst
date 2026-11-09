@@ -1,0 +1,39 @@
+#!/bin/sh
+# Runs as root after the package is installed or upgraded.
+# Never touches shop data (~/Documents/MedBillings).
+set -e
+
+APP_ID=com.developerstring.medical
+LAUNCHER=/usr/share/applications/$APP_ID.desktop
+
+if [ "$1" = "configure" ]; then
+  update-desktop-database -q /usr/share/applications 2>/dev/null || true
+  gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
+
+  # Put a MedBillings icon on the desktop of every normal user account.
+  getent passwd | while IFS=: read -r user _ uid gid _ home _; do
+    [ "$uid" -ge 1000 ] 2>/dev/null && [ "$uid" -lt 60000 ] || continue
+    [ -d "$home" ] || continue
+    desk=$(HOME="$home" xdg-user-dir DESKTOP 2>/dev/null || true)
+    [ -n "$desk" ] || desk="$home/Desktop"
+    [ -d "$desk" ] || continue
+    target="$desk/$APP_ID.desktop"
+    install -o "$user" -g "$gid" -m 755 "$LAUNCHER" "$target" || continue
+
+    # Mark the launcher as trusted so a double-click opens the app straight
+    # away instead of an "Untrusted application launcher" prompt.
+    # Xfce 4.18+ checks a checksum, Cinnamon/GNOME check metadata::trusted.
+    # Best effort: needs the user's D-Bus session (or a throwaway one).
+    sum=$(sha256sum "$target" | cut -d' ' -f1)
+    if [ -S "/run/user/$uid/bus" ]; then
+      set -- env XDG_RUNTIME_DIR="/run/user/$uid" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus"
+    else
+      set -- dbus-run-session --
+    fi
+    runuser -u "$user" -- "$@" gio set "$target" metadata::xfce-exe-checksum "$sum" >/dev/null 2>&1 || true
+    runuser -u "$user" -- "$@" gio set "$target" metadata::trusted true >/dev/null 2>&1 || true
+  done
+fi
+
+exit 0

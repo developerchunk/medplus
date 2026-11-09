@@ -1,0 +1,21 @@
+#!/bin/sh
+# Runs as root after the package is removed.
+# Shop data (~/Documents/MedBillings: database, bills, backups) is NEVER deleted.
+set -e
+
+APP_ID=com.developerstring.medical
+
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+  # Remove the desktop icons postinst created.
+  getent passwd | while IFS=: read -r _ _ uid _ _ home _; do
+    [ "$uid" -ge 1000 ] 2>/dev/null && [ "$uid" -lt 60000 ] || continue
+    [ -d "$home" ] || continue
+    desk=$(HOME="$home" xdg-user-dir DESKTOP 2>/dev/null || true)
+    [ -n "$desk" ] || desk="$home/Desktop"
+    rm -f "$desk/$APP_ID.desktop"
+  done
+  update-desktop-database -q /usr/share/applications 2>/dev/null || true
+  gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
+fi
+
+exit 0

@@ -1,0 +1,30 @@
+# Builds the Linux installer (medbillings_<version>_amd64.deb) on GitHub's
+# Ubuntu 22.04 machines, so no Linux PC is needed. Built on 22.04 so it runs on
+# Linux Mint 21 and 22. Download it from the run's "Artifacts" section.
+name: Linux installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  deb:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.0
+          cache: true
+
+      - name: Build .deb
+        run: linux/packaging/build_deb.sh --install-deps
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: medbillings-linux-deb
+          path: dist/*.deb
+          if-no-files-found: error

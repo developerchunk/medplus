@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=MedBillings
+GenericName=Medical Billing
+Comment=Billing and stock for the medical shop
+Exec=/opt/medbillings/MedBillings
+Icon=com.developerstring.medical
+Terminal=false
+StartupNotify=true
+StartupWMClass=com.developerstring.medical
+Categories=Office;Finance;
+Keywords=billing;bill;pharmacy;medical;medicine;stock;
