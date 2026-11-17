@@ -9,6 +9,7 @@ import '../../data/repo.dart';
 import '../../models/models.dart';
 import '../nav.dart';
 import '../theme.dart';
+import '../suppliers/supplier_account.dart';
 import '../widgets/common.dart';
 import 'batch_dialogs.dart';
 import 'product_form.dart';
@@ -227,6 +228,7 @@ class _ProductDetailState extends State<_ProductDetail> {
   ProductStock? _ps;
   List<Batch> _batches = [];
   List<StockMovement> _moves = [];
+  List<BatchOrigin> _origins = []; // stock entries that brought each batch in, newest first
   bool _showEmpty = false;
 
   @override
@@ -246,12 +248,36 @@ class _ProductDetailState extends State<_ProductDetail> {
     final ps = await Repo.productStock(widget.productId);
     final batches = await Repo.batchesForProduct(widget.productId, includeEmpty: true);
     final moves = await Repo.movements(productId: widget.productId, limit: 200);
+    final origins = await Repo.batchOrigins(widget.productId);
     if (!mounted) return;
     setState(() {
       _ps = ps;
       _batches = batches;
       _moves = moves;
+      _origins = origins;
     });
+  }
+
+  /// "from Shree Medical · Inv 123 · 12/11/26" under a batch number; tap opens that supplier's account.
+  Widget _originLine(Batch b) {
+    final from = _origins.where((o) => o.batchId == b.id).toList();
+    if (from.isEmpty) {
+      return Text(b.purchaseId == null ? 'Opening stock' : 'Source not recorded', style: TextStyle(fontSize: 11.5, color: context.muted));
+    }
+    final o = from.first;
+    final more = from.length > 1 ? ' +${from.length - 1} more' : '';
+    return Tooltip(
+      message: from.map((x) => '${x.sourceLabel} · ${x.invoiceNo.isEmpty ? 'entry #${x.purchaseId}' : 'Inv ${x.invoiceNo}'} · ${fmtDate(x.date)}').join('\n'),
+      child: InkWell(
+        onTap: o.source.name.isEmpty ? null : () => showSupplierAccount(context, o.source),
+        child: Text(
+          'from ${o.sourceLabel} · ${o.invoiceNo.isEmpty ? '' : 'Inv ${o.invoiceNo} · '}${fmtDateShort(o.date)}$more',
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 11.5, color: AppColors.info, fontWeight: FontWeight.w600),
+        ),
+      ),
+    );
   }
 
   Future<void> _delete() async {
@@ -282,7 +308,7 @@ class _ProductDetailState extends State<_ProductDetail> {
         width: (size.width * 0.8).clamp(760, 1100),
         height: size.height * 0.88,
         child: DefaultTabController(
-          length: 2,
+          length: 3,
           child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(22, 18, 12, 6),
@@ -355,7 +381,11 @@ class _ProductDetailState extends State<_ProductDetail> {
               isScrollable: true,
               tabAlignment: TabAlignment.start,
               padding: const EdgeInsets.symmetric(horizontal: 12),
-              tabs: [Tab(text: 'Batches (${batches.length})'), Tab(text: 'Stock history (${_moves.length})')],
+              tabs: [
+                Tab(text: 'Batches (${batches.length})'),
+                Tab(text: 'Bought from (${_origins.length})'),
+                Tab(text: 'Stock history (${_moves.length})'),
+              ],
             ),
             const Divider(),
             Expanded(
@@ -378,9 +408,9 @@ class _ProductDetailState extends State<_ProductDetail> {
                         ? const EmptyState(icon: Icons.layers_clear_outlined, title: 'No batches in stock', message: 'Record a Stock Entry from your wholesaler, or add opening stock.')
                         : SimpleTable(
                             columns: const [
-                              TableCol('Batch', flex: 1.2),
-                              TableCol('Expiry', width: 150),
-                              TableCol('Stock', flex: 1.4),
+                              TableCol('Batch · bought from', flex: 2.8),
+                              TableCol('Expiry', width: 104),
+                              TableCol('Stock', flex: 1.1),
                               TableCol('MRP', width: 80, right: true),
                               TableCol('Sale rate', width: 80, right: true),
                               TableCol('Cost', width: 80, right: true),
@@ -392,8 +422,11 @@ class _ProductDetailState extends State<_ProductDetail> {
                               final b = batches[i];
                               return [
                                 Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                  Text(b.batchNo, style: const TextStyle(fontWeight: FontWeight.w600)),
-                                  if (b.status != 'active') Text(b.status, style: TextStyle(fontSize: 11.5, color: context.muted)),
+                                  Row(children: [
+                                    Flexible(child: Text(b.batchNo, style: const TextStyle(fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis)),
+                                    if (b.status != 'active') ...[const SizedBox(width: 6), Pill(b.status, color: context.muted, small: true)],
+                                  ]),
+                                  _originLine(b),
                                 ]),
                                 ExpiryBadge(b.expiry, showPhrase: true, small: true),
                                 Text(b.qty == 0 ? 'Sold out' : p.qty(b.qty), style: TextStyle(color: b.qty == 0 ? context.muted : null)),
@@ -410,6 +443,42 @@ class _ProductDetailState extends State<_ProductDetail> {
                           ),
                   ),
                 ]),
+                _origins.isEmpty
+                    ? const EmptyState(icon: Icons.storefront_outlined, title: 'No stock entries yet', message: 'Stock entries and medicines brought from other shops show here.')
+                    : SimpleTable(
+                        columns: const [
+                          TableCol('Date', width: 104),
+                          TableCol('Supplier / shop', flex: 2),
+                          TableCol('Invoice', flex: 1),
+                          TableCol('Batch', flex: 1),
+                          TableCol('Qty', flex: 1.2),
+                          TableCol('Cost', width: 80, right: true),
+                          TableCol('', width: 92),
+                        ],
+                        rowCount: _origins.length,
+                        onTap: (i) {
+                          final o = _origins[i];
+                          if (o.source.name.isNotEmpty) showSupplierAccount(context, o.source);
+                        },
+                        cells: (i) {
+                          final o = _origins[i];
+                          return [
+                            Text(fmtDateShort(o.date), style: TextStyle(color: context.muted)),
+                            Row(children: [
+                              Flexible(child: Text(o.sourceLabel, style: const TextStyle(fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis)),
+                              if (o.source.id == null && o.source.name.isNotEmpty) ...[
+                                const SizedBox(width: 6),
+                                const Pill('One-off', color: AppColors.info, small: true),
+                              ],
+                            ]),
+                            Text(o.invoiceNo.isEmpty ? '—' : o.invoiceNo, overflow: TextOverflow.ellipsis),
+                            Text(o.batchNo, overflow: TextOverflow.ellipsis),
+                            Text(p.qty(o.units)),
+                            Text(amount(o.ratePerPack), style: TextStyle(color: context.muted)),
+                            o.paid ? Text('Paid', style: TextStyle(color: context.muted)) : const Pill('On credit', color: AppColors.warning, small: true),
+                          ];
+                        },
+                      ),
                 _moves.isEmpty
                     ? const EmptyState(icon: Icons.swap_vert, title: 'No stock movements yet')
                     : MovementTable(moves: _moves, showProduct: false),

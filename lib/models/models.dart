@@ -394,6 +394,32 @@ class Customer {
 }
 
 /// One line of a customer's credit account: a credit bill (debit) or a payment (credit).
+/// One stock entry that brought a batch in: which supplier or shop, invoice and date.
+class BatchOrigin {
+  BatchOrigin({
+    required this.batchId,
+    required this.batchNo,
+    required this.purchaseId,
+    required this.source,
+    required this.invoiceNo,
+    required this.date,
+    required this.units,
+    required this.ratePerPack,
+    required this.paid,
+  });
+  final int? batchId;
+  final String batchNo;
+  final int purchaseId;
+  final Supplier source; // id == null: a one-off shop (or a deleted supplier when the name is empty)
+  final String invoiceNo;
+  final DateTime date;
+  final int units;
+  final double ratePerPack;
+  final bool paid;
+
+  String get sourceLabel => source.name.isEmpty ? 'Unknown supplier' : source.name;
+}
+
 class CreditEntry {
   final DateTime date;
   final String kind; // bill | payment

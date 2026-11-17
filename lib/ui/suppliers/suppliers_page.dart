@@ -7,6 +7,7 @@ import '../../data/repo.dart';
 import '../../models/models.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
+import 'supplier_account.dart';
 
 Future<Supplier?> showSupplierForm(BuildContext context, {Supplier? supplier}) =>
     showDialog<Supplier>(context: context, builder: (_) => _SupplierForm(supplier: supplier));
@@ -107,66 +108,32 @@ class _SuppliersPageState extends State<SuppliersPage> with DataReload {
     super.dispose();
   }
 
-  Future<void> _open(Supplier s) async {
-    final purchases = await Repo.purchases(supplierId: s.id);
-    if (!mounted) return;
-    await showDialog(
-      context: context,
-      builder: (ctx) => FormDialog(
-        title: s.name,
-        subtitle: [s.contactPerson, s.phone, s.gstin.isEmpty ? '' : 'GSTIN ${s.gstin}', s.drugLicense.isEmpty ? '' : 'DL ${s.drugLicense}'].where((e) => e.isNotEmpty).join(' · '),
-        icon: Icons.storefront_outlined,
-        width: 760,
-        actions: [
-          TextButton.icon(
-            onPressed: () async {
-              if (!await confirm(ctx, title: 'Delete ${s.name}?', message: 'Past stock entries stay, but will no longer show this supplier.', confirmLabel: 'Delete', destructive: true)) return;
-              await Repo.deleteSupplier(s.id!);
-              if (ctx.mounted) Navigator.pop(ctx);
-            },
-            icon: const Icon(Icons.delete_outline, size: 18),
-            label: const Text('Delete'),
-            style: TextButton.styleFrom(foregroundColor: AppColors.danger),
-          ),
-          OutlinedButton.icon(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              await showSupplierForm(context, supplier: s);
-            },
-            icon: const Icon(Icons.edit_outlined, size: 18),
-            label: const Text('Edit'),
-          ),
-          FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
-        ],
-        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          if (s.address.isNotEmpty) Text(s.address),
-          if (s.notes.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 6), child: Text(s.notes, style: TextStyle(color: ctx.muted))),
-          const SizedBox(height: 12),
-          SectionLabel('Purchase history (${purchases.length})'),
-          if (purchases.isEmpty) Text('No stock entries from this supplier yet.', style: TextStyle(color: ctx.muted)),
-          for (final p in purchases.take(50))
-            ListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.receipt_outlined),
-              title: Text('${p.invoiceNo.isEmpty ? 'Entry #${p.id}' : 'Invoice ${p.invoiceNo}'} · ${fmtDate(p.invoiceDate)}'),
-              subtitle: Text('${p.itemCount} items'),
-              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                if (!p.paid) const Padding(padding: EdgeInsets.only(right: 8), child: Pill('Unpaid', color: AppColors.warning, small: true)),
-                Text(money(p.netTotal), style: const TextStyle(fontWeight: FontWeight.w700)),
-              ]),
-            ),
-        ]),
-      ),
-    );
-  }
+  Future<void> _open(Supplier s) => showSupplierAccount(
+        context,
+        s,
+        onEdit: () async {
+          Navigator.pop(context);
+          await showSupplierForm(context, supplier: s);
+        },
+        onDelete: () async {
+          if (!await confirm(context,
+              title: 'Delete ${s.name}?',
+              message: 'Past stock entries stay, but will no longer show this supplier. Payments recorded to them are removed.',
+              confirmLabel: 'Delete',
+              destructive: true)) {
+            return;
+          }
+          await Repo.deleteSupplier(s.id!);
+          if (mounted) Navigator.pop(context);
+        },
+      );
 
   @override
   Widget build(BuildContext context) {
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       PageHeader(
         title: 'Suppliers',
-        subtitle: 'Wholesalers and distributors you buy from',
+        subtitle: 'Who you buy from: goods received, paid and remaining',
         actions: [FilledButton.icon(onPressed: () => showSupplierForm(context), icon: const Icon(Icons.add, size: 18), label: const Text('New supplier'))],
         bottom: Align(
           alignment: Alignment.centerLeft,
@@ -195,29 +162,36 @@ class _SuppliersPageState extends State<SuppliersPage> with DataReload {
                 : SimpleTable(
                     columns: const [
                       TableCol('Supplier', flex: 2.4),
-                      TableCol('Phone', flex: 1.2),
-                      TableCol('GSTIN / DL', flex: 1.6),
-                      TableCol('Entries', width: 70, right: true),
-                      TableCol('Purchased', width: 120, right: true),
-                      TableCol('Unpaid', width: 110, right: true),
-                      TableCol('Last', width: 110),
+                      TableCol('Phone', flex: 1.1),
+                      TableCol('Entries', width: 78, right: true),
+                      TableCol('Goods', width: 120, right: true),
+                      TableCol('Paid', width: 110, right: true),
+                      TableCol('Remaining', width: 110, right: true),
+                      TableCol('Last', width: 92),
                     ],
                     rowCount: _rows.length,
                     onTap: (i) => _open(Supplier.fromMap(_rows[i])),
                     cells: (i) {
                       final r = _rows[i];
                       final s = Supplier.fromMap(r);
-                      final unpaid = (r['unpaid_total'] as num).toDouble();
+                      final oneOff = r['one_off'] == 1;
+                      final remaining = (r['remaining'] as num).toDouble();
                       return [
                         Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          Text(s.name, style: const TextStyle(fontWeight: FontWeight.w600)),
-                          if (s.contactPerson.isNotEmpty) Text(s.contactPerson, style: TextStyle(fontSize: 12, color: context.muted)),
+                          Row(children: [
+                            Flexible(child: Text(s.name, style: const TextStyle(fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis)),
+                            if (oneOff) ...[const SizedBox(width: 6), const Pill('One-off shop', color: AppColors.info, small: true)],
+                          ]),
+                          if ([s.contactPerson, s.gstin].any((e) => e.isNotEmpty))
+                            Text([s.contactPerson, s.gstin].where((e) => e.isNotEmpty).join(' · '),
+                                style: TextStyle(fontSize: 12, color: context.muted), overflow: TextOverflow.ellipsis),
                         ]),
                         Text(s.phone.isEmpty ? '—' : s.phone),
-                        Text([s.gstin, s.drugLicense].where((e) => e.isNotEmpty).join(' · '), style: TextStyle(color: context.muted), overflow: TextOverflow.ellipsis),
                         Text('${r['purchase_count']}'),
                         Text(money((r['purchase_total'] as num).toDouble())),
-                        Text(unpaid > 0 ? money(unpaid) : '—', style: TextStyle(color: unpaid > 0 ? AppColors.warning : context.muted, fontWeight: FontWeight.w600)),
+                        Text(money((r['paid_total'] as num).toDouble()), style: const TextStyle(color: AppColors.success)),
+                        Text(remaining > 0.004 ? money(remaining) : (remaining < -0.004 ? '${money(-remaining)} adv.' : '—'),
+                            style: TextStyle(color: remaining > 0.004 ? AppColors.warning : context.muted, fontWeight: FontWeight.w700)),
                         Text(r['last_purchase'] == null ? '—' : fmtDateShort(DateTime.parse(r['last_purchase'] as String)), style: TextStyle(color: context.muted)),
                       ];
                     },

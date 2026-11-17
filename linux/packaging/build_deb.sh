@@ -104,7 +104,7 @@ cat > "$STAGE/DEBIAN/control" <<EOF
 Package: $PKG
 Version: $DEB_VERSION
 Architecture: amd64
-Maintainer: MedBillings <medbillings@localhost>
+Maintainer: MedBillings <adityashinde5033@gmail.com>
 Installed-Size: $INSTALLED_KB
 Depends: libgtk-3-0t64 | libgtk-3-0, zenity, xdg-user-dirs, xdg-utils, pkexec | policykit-1, openssl
 Recommends: cups

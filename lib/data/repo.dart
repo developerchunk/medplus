@@ -298,17 +298,149 @@ class Repo {
 
   // ============================================================ suppliers
 
+  /// Saved suppliers plus one-off shops (from medicines brought for bills), each with
+  /// goods received, paid and remaining. One-off rows have a null id and `one_off` = 1.
   static Future<List<Map<String, Object?>>> suppliersWithStats(String query) async {
-    return _db.rawQuery('''
+    final q = '%${query.trim()}%';
+    final saved = await _db.rawQuery('''
       SELECT s.*,
         (SELECT COUNT(*) FROM purchases pu WHERE pu.supplier_id = s.id) AS purchase_count,
         (SELECT COALESCE(SUM(net_total), 0) FROM purchases pu WHERE pu.supplier_id = s.id) AS purchase_total,
-        (SELECT COALESCE(SUM(net_total), 0) FROM purchases pu WHERE pu.supplier_id = s.id AND pu.paid = 0) AS unpaid_total,
-        (SELECT MAX(invoice_date) FROM purchases pu WHERE pu.supplier_id = s.id) AS last_purchase
+        (SELECT COALESCE(SUM(net_total), 0) FROM purchases pu WHERE pu.supplier_id = s.id AND pu.paid = 1)
+          + (SELECT COALESCE(SUM(amount), 0) FROM supplier_payments sp WHERE sp.supplier_id = s.id) AS paid_total,
+        (SELECT MAX(invoice_date) FROM purchases pu WHERE pu.supplier_id = s.id) AS last_purchase,
+        0 AS one_off
       FROM suppliers s
       WHERE s.name LIKE ?1 OR s.phone LIKE ?1 OR s.gstin LIKE ?1 OR s.contact_person LIKE ?1
       ORDER BY s.name COLLATE NOCASE
-    ''', ['%${query.trim()}%']);
+    ''', [q]);
+    final oneOff = await _db.rawQuery('''
+      SELECT NULL AS id, MIN(pu.source_name) AS name,
+        COUNT(*) AS purchase_count,
+        COALESCE(SUM(pu.net_total), 0) AS purchase_total,
+        COALESCE(SUM(CASE WHEN pu.paid = 1 THEN pu.net_total ELSE 0 END), 0)
+          + (SELECT COALESCE(SUM(amount), 0) FROM supplier_payments sp WHERE sp.supplier_id IS NULL AND sp.source_name = MIN(pu.source_name) COLLATE NOCASE) AS paid_total,
+        MAX(pu.invoice_date) AS last_purchase,
+        1 AS one_off
+      FROM purchases pu
+      WHERE pu.supplier_id IS NULL AND pu.source_name != '' AND pu.source_name LIKE ?1
+      GROUP BY pu.source_name COLLATE NOCASE
+      ORDER BY name COLLATE NOCASE
+    ''', [q]);
+    return [
+      for (final r in [...saved, ...oneOff])
+        {...r, 'remaining': round2(((r['purchase_total'] as num?) ?? 0) - ((r['paid_total'] as num?) ?? 0))},
+    ];
+  }
+
+  /// SQL filter on `purchases pu` for a saved supplier, or a one-off shop by name.
+  static (String, List<Object?>) _sourceWhere(Supplier s) =>
+      s.id != null ? ('pu.supplier_id = ?', [s.id]) : ("pu.supplier_id IS NULL AND pu.source_name = ? COLLATE NOCASE", [s.name]);
+
+  /// Medicines received from [s]: total quantity, how often, last time and value.
+  static Future<List<Map<String, Object?>>> supplierProducts(Supplier s) {
+    final (where, args) = _sourceWhere(s);
+    return _db.rawQuery('''
+      SELECT pi.product_id, MIN(pi.product_name) AS product_name,
+        COALESCE(p.unit_name, 'Unit') AS unit_name, COALESCE(p.pack_name, 'Pack') AS pack_name, COALESCE(p.pack_size, 1) AS pack_size,
+        SUM((pi.qty_packs + pi.free_packs) * pi.pack_size + COALESCE(pi.loose_units, 0)) AS units,
+        COUNT(DISTINCT pi.purchase_id) AS times,
+        MAX(pu.invoice_date) AS last_date,
+        COALESCE(SUM(pi.amount), 0) AS value
+      FROM purchase_items pi
+      JOIN purchases pu ON pu.id = pi.purchase_id
+      LEFT JOIN products p ON p.id = pi.product_id
+      WHERE $where
+      GROUP BY pi.product_id
+      ORDER BY last_date DESC, product_name COLLATE NOCASE
+    ''', args);
+  }
+
+  /// Goods received (stock entries) and money paid to [s], oldest first, with the running
+  /// amount still owed. Entries marked paid at stock entry show as paid straight away.
+  static Future<List<CreditEntry>> supplierLedger(Supplier s) async {
+    final (where, args) = _sourceWhere(s);
+    final purchases = await _db.rawQuery('''
+      SELECT pu.*, (SELECT COUNT(*) FROM purchase_items pi WHERE pi.purchase_id = pu.id) AS item_count
+      FROM purchases pu WHERE $where ORDER BY pu.invoice_date, pu.id
+    ''', args);
+    final pays = s.id != null
+        ? await _db.query('supplier_payments', where: 'supplier_id = ?', whereArgs: [s.id], orderBy: 'created_at')
+        : await _db.query('supplier_payments', where: 'supplier_id IS NULL AND source_name = ? COLLATE NOCASE', whereArgs: [s.name], orderBy: 'created_at');
+    final entries = <CreditEntry>[
+      for (final pu in purchases)
+        CreditEntry(
+          date: DateTime.parse(pu['invoice_date'] as String),
+          kind: 'purchase',
+          refId: pu['id'] as int,
+          label: (pu['invoice_no'] as String? ?? '').isEmpty ? 'Stock entry #${pu['id']}' : 'Invoice ${pu['invoice_no']}',
+          debit: (pu['net_total'] as num).toDouble(),
+          credit: pu['paid'] == 1 ? (pu['net_total'] as num).toDouble() : 0,
+          note: '${pu['item_count']} item${pu['item_count'] == 1 ? '' : 's'}${pu['paid'] == 1 ? ' · paid at purchase' : ''}',
+        ),
+      for (final p in pays)
+        CreditEntry(
+          date: DateTime.parse(p['created_at'] as String),
+          kind: 'payment',
+          refId: p['id'] as int,
+          label: 'Payment · ${p['mode']}',
+          credit: (p['amount'] as num).toDouble(),
+          note: p['note'] as String? ?? '',
+        ),
+    ]..sort((a, b) => a.date.compareTo(b.date));
+    var bal = 0.0;
+    for (final e in entries) {
+      bal = round2(bal + e.debit - e.credit);
+      e.runningBalance = bal;
+    }
+    return entries;
+  }
+
+  /// Money paid to a supplier or one-off shop.
+  static Future<void> paySupplier(Supplier s, double amount, {String mode = 'Cash', String note = ''}) async {
+    if (amount <= 0) throw RepoException('Enter the amount paid');
+    await _db.insert('supplier_payments', {
+      'supplier_id': s.id,
+      'source_name': s.id == null ? s.name : '',
+      'created_at': _now,
+      'amount': round2(amount),
+      'mode': mode,
+      'note': note,
+    });
+    notifyDataChanged();
+  }
+
+  static Future<void> deleteSupplierPayment(int id) async {
+    await _db.delete('supplier_payments', where: 'id = ?', whereArgs: [id]);
+    notifyDataChanged();
+  }
+
+  /// Where each batch of a medicine came from: every stock entry that brought it in, newest first.
+  static Future<List<BatchOrigin>> batchOrigins(int productId) async {
+    final rows = await _db.rawQuery('''
+      SELECT pi.batch_id, pi.batch_no, pu.id AS purchase_id, pu.supplier_id, pu.invoice_no, pu.invoice_date, pu.paid, pi.purchase_rate,
+        COALESCE(s.name, NULLIF(pu.source_name, ''), '') AS source,
+        (pi.qty_packs + pi.free_packs) * pi.pack_size + COALESCE(pi.loose_units, 0) AS units
+      FROM purchase_items pi
+      JOIN purchases pu ON pu.id = pi.purchase_id
+      LEFT JOIN suppliers s ON s.id = pu.supplier_id
+      WHERE pi.product_id = ?
+      ORDER BY pu.invoice_date DESC, pu.id DESC
+    ''', [productId]);
+    return [
+      for (final r in rows)
+        BatchOrigin(
+          batchId: r['batch_id'] as int?,
+          batchNo: r['batch_no'] as String? ?? '',
+          purchaseId: r['purchase_id'] as int,
+          source: Supplier(id: r['supplier_id'] as int?, name: r['source'] as String),
+          invoiceNo: r['invoice_no'] as String? ?? '',
+          date: DateTime.parse(r['invoice_date'] as String),
+          units: (r['units'] as num?)?.toInt() ?? 0,
+          ratePerPack: (r['purchase_rate'] as num?)?.toDouble() ?? 0,
+          paid: r['paid'] == 1,
+        ),
+    ];
   }
 
   static Future<List<Supplier>> searchSuppliers(String query, {int limit = 12}) async {

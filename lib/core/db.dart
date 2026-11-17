@@ -35,7 +35,7 @@ void notifyDataChanged() => dataVersion.value++;
 class AppDb {
   AppDb._();
   static Database? _db;
-  static const schemaVersion = 6;
+  static const schemaVersion = 7;
 
   static Database get db {
     final d = _db;
@@ -94,6 +94,11 @@ class AppDb {
             await db.execute('ALTER TABLE purchase_items ADD COLUMN loose_units INTEGER DEFAULT 0');
             await db.execute('ALTER TABLE sale_items ADD COLUMN discount_rs REAL DEFAULT 0');
           }
+          if (from < 7) {
+            // v7: payments to suppliers (paid / remaining per supplier).
+            await db.execute(_supplierPayments);
+            await db.execute(_supplierPaymentsIdx);
+          }
         },
       ),
     );
@@ -120,6 +125,18 @@ class AppDb {
       note TEXT DEFAULT ''
     )''';
   static const _creditPaymentsIdx = 'CREATE INDEX idx_credit_payments_customer ON credit_payments(customer_id)';
+
+  /// Money paid to a supplier (or a one-off shop, by [source_name]) against unpaid stock entries.
+  static const _supplierPayments = '''CREATE TABLE supplier_payments(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      supplier_id INTEGER REFERENCES suppliers(id) ON DELETE CASCADE,
+      source_name TEXT DEFAULT '',
+      created_at TEXT NOT NULL,
+      amount REAL NOT NULL,
+      mode TEXT DEFAULT 'Cash',
+      note TEXT DEFAULT ''
+    )''';
+  static const _supplierPaymentsIdx = 'CREATE INDEX idx_supplier_payments_supplier ON supplier_payments(supplier_id)';
 
   static const _schema = <String>[
     '''CREATE TABLE settings(
@@ -240,6 +257,8 @@ class AppDb {
     )''',
     _creditPayments,
     _creditPaymentsIdx,
+    _supplierPayments,
+    _supplierPaymentsIdx,
     '''CREATE TABLE sales(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       bill_no TEXT NOT NULL UNIQUE,
