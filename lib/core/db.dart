@@ -35,7 +35,7 @@ void notifyDataChanged() => dataVersion.value++;
 class AppDb {
   AppDb._();
   static Database? _db;
-  static const schemaVersion = 7;
+  static const schemaVersion = 8;
 
   static Database get db {
     final d = _db;
@@ -99,6 +99,12 @@ class AppDb {
             await db.execute(_supplierPayments);
             await db.execute(_supplierPaymentsIdx);
           }
+          if (from < 8) {
+            // v8: a payment can be for one bill (purchase_id); remember when a bill was marked paid.
+            if (from >= 7) await db.execute('ALTER TABLE supplier_payments ADD COLUMN purchase_id INTEGER');
+            await db.execute("ALTER TABLE purchases ADD COLUMN paid_at TEXT DEFAULT ''");
+            await db.execute("UPDATE purchases SET paid_at = created_at WHERE paid = 1");
+          }
         },
       ),
     );
@@ -134,7 +140,8 @@ class AppDb {
       created_at TEXT NOT NULL,
       amount REAL NOT NULL,
       mode TEXT DEFAULT 'Cash',
-      note TEXT DEFAULT ''
+      note TEXT DEFAULT '',
+      purchase_id INTEGER
     )''';
   static const _supplierPaymentsIdx = 'CREATE INDEX idx_supplier_payments_supplier ON supplier_payments(supplier_id)';
 
@@ -190,7 +197,8 @@ class AppDb {
       net_total REAL DEFAULT 0,
       paid INTEGER DEFAULT 1,
       notes TEXT DEFAULT '',
-      source_name TEXT DEFAULT ''
+      source_name TEXT DEFAULT '',
+      paid_at TEXT DEFAULT ''
     )''',
     '''CREATE TABLE batches(
       id INTEGER PRIMARY KEY AUTOINCREMENT,

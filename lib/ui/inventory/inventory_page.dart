@@ -9,7 +9,6 @@ import '../../data/repo.dart';
 import '../../models/models.dart';
 import '../nav.dart';
 import '../theme.dart';
-import '../suppliers/supplier_account.dart';
 import '../widgets/common.dart';
 import 'batch_dialogs.dart';
 import 'product_form.dart';
@@ -25,6 +24,10 @@ class _InventoryPageState extends State<InventoryPage> with DataReload {
   String _filter = 'all';
   List<ProductStock> _items = [];
   Map<String, num> _stats = {};
+  Map<int, List<String>> _suppliersOf = {}; // medicine id → suppliers / shops, most recent first
+  List<Map<String, Object?>> _supplierRows = []; // suppliers with goods / paid / remaining
+  String? _supplier; // show only medicines bought from this supplier or shop
+  String _sort = 'name'; // name | supplier | stock | expiry
   bool _loading = true;
   Timer? _debounce;
 
@@ -53,13 +56,109 @@ class _InventoryPageState extends State<InventoryPage> with DataReload {
   void reload() async {
     final items = await Repo.searchProducts(_query, limit: 2000, filter: _filter);
     final stats = await Repo.inventoryStats();
+    final suppliersOf = await Repo.productSuppliers();
+    final supplierRows = await Repo.suppliersWithStats('');
     if (mounted) {
       setState(() {
         _items = items;
         _stats = stats;
+        _suppliersOf = suppliersOf;
+        _supplierRows = supplierRows.where((r) => (r['purchase_count'] as int? ?? 0) > 0).toList();
         _loading = false;
       });
     }
+  }
+
+  List<String> _from(ProductStock ps) => _suppliersOf[ps.product.id] ?? const [];
+
+  /// The list after the supplier filter and the chosen sort order.
+  List<ProductStock> get _shown {
+    final sup = _supplier?.toLowerCase();
+    final list = sup == null ? [..._items] : _items.where((ps) => _from(ps).any((n) => n.toLowerCase() == sup)).toList();
+    int byName(ProductStock a, ProductStock b) => a.product.name.toLowerCase().compareTo(b.product.name.toLowerCase());
+    switch (_sort) {
+      case 'supplier':
+        // Grouped by (latest) supplier; medicines with no recorded supplier at the end.
+        list.sort((a, b) {
+          final sa = _from(a).firstOrNull?.toLowerCase(), sb = _from(b).firstOrNull?.toLowerCase();
+          if (sa != sb) return sa == null ? 1 : (sb == null ? -1 : sa.compareTo(sb));
+          return byName(a, b);
+        });
+      case 'stock':
+        list.sort((a, b) => a.stockUnits != b.stockUnits ? a.stockUnits.compareTo(b.stockUnits) : byName(a, b));
+      case 'expiry':
+        list.sort((a, b) {
+          final ea = a.nearestExpiry, eb = b.nearestExpiry;
+          if (ea != eb) return ea == null ? 1 : (eb == null ? -1 : ea.compareTo(eb));
+          return byName(a, b);
+        });
+      default:
+        list.sort(byName);
+    }
+    return list;
+  }
+
+  static const _sorts = {'name': 'Name (A–Z)', 'supplier': 'Supplier', 'stock': 'Lowest stock first', 'expiry': 'Earliest expiry first'};
+
+  /// A dropdown that looks like an outlined button.
+  Widget _menuButton<T>({required IconData icon, required String label, required List<PopupMenuEntry<T>> items, required ValueChanged<T> onSelected}) =>
+      PopupMenuButton<T>(
+        onSelected: onSelected,
+        itemBuilder: (_) => items,
+        child: IgnorePointer(
+          child: OutlinedButton.icon(
+            onPressed: () {},
+            icon: Icon(icon, size: 18),
+            label: Row(mainAxisSize: MainAxisSize.min, children: [
+              ConstrainedBox(constraints: const BoxConstraints(maxWidth: 220), child: Text(label, overflow: TextOverflow.ellipsis)),
+              const Icon(Icons.arrow_drop_down, size: 20),
+            ]),
+          ),
+        ),
+      );
+
+  Widget _supplierCell(ProductStock ps) {
+    final from = _from(ps);
+    if (from.isEmpty) return Text('—', style: TextStyle(color: context.muted));
+    return Tooltip(
+      message: from.join('\n'),
+      child: Text('${from.first}${from.length > 1 ? '  +${from.length - 1}' : ''}', overflow: TextOverflow.ellipsis, maxLines: 2),
+    );
+  }
+
+  /// Goods / paid / remaining for the supplier picked in the filter.
+  Widget _supplierSummary() {
+    final r = _supplierRows.where((x) => (x['name'] as String).toLowerCase() == _supplier!.toLowerCase()).firstOrNull;
+    if (r == null) return const SizedBox.shrink();
+    final s = Supplier.fromMap(r);
+    final remaining = (r['remaining'] as num).toDouble();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(28, 0, 28, 12),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(14, 8, 8, 8),
+        decoration: BoxDecoration(
+          color: AppColors.info.withValues(alpha: context.isDark ? 0.15 : 0.06),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppColors.info.withValues(alpha: 0.3)),
+        ),
+        child: Row(children: [
+          Icon(s.id == null ? Icons.local_shipping_outlined : Icons.storefront_outlined, color: AppColors.info, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Wrap(spacing: 18, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
+              Text(s.name, style: const TextStyle(fontWeight: FontWeight.w700)),
+              Text('${_shown.length} medicine${_shown.length == 1 ? '' : 's'}', style: TextStyle(color: context.muted)),
+              Text('Goods ${money((r['purchase_total'] as num).toDouble())}'),
+              Text('Paid ${money((r['paid_total'] as num).toDouble())}', style: const TextStyle(color: AppColors.success)),
+              Text(remaining > 0.004 ? 'Remaining ${money(remaining)}' : 'Nothing owed',
+                  style: TextStyle(fontWeight: FontWeight.w700, color: remaining > 0.004 ? AppColors.warning : AppColors.success)),
+            ]),
+          ),
+          TextButton.icon(onPressed: () => Nav.openSupplier(s), icon: const Icon(Icons.open_in_new, size: 16), label: const Text('Open account')),
+          IconButton(tooltip: 'Show all suppliers', icon: const Icon(Icons.close, size: 18), onPressed: () => setState(() => _supplier = null)),
+        ]),
+      ),
+    );
   }
 
   Future<void> _newProduct() async {
@@ -138,13 +237,44 @@ class _InventoryPageState extends State<InventoryPage> with DataReload {
       ),
       Padding(
         padding: const EdgeInsets.fromLTRB(28, 0, 28, 12),
-        child: Wrap(spacing: 8, runSpacing: 6, children: [
-          Pill('${intFmt(_stats['products'] ?? 0)} medicines', color: AppColors.info, icon: Icons.medication_outlined),
-          Pill('Stock value ${money0(_stats['stock_value'] ?? 0)} (cost)', color: AppColors.brand, icon: Icons.account_balance_wallet_outlined),
-          Pill('${money0(_stats['stock_mrp'] ?? 0)} at MRP', color: context.muted),
-          if ((_stats['low_stock'] ?? 0) > 0) Pill('${_stats['low_stock']} low on stock', color: AppColors.warning, icon: Icons.trending_down),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+          Expanded(
+            child: Wrap(spacing: 8, runSpacing: 6, children: [
+              Pill('${intFmt(_stats['products'] ?? 0)} medicines', color: AppColors.info, icon: Icons.medication_outlined),
+              Pill('Stock value ${money0(_stats['stock_value'] ?? 0)} (cost)', color: AppColors.brand, icon: Icons.account_balance_wallet_outlined),
+              Pill('${money0(_stats['stock_mrp'] ?? 0)} at MRP', color: context.muted),
+              if ((_stats['low_stock'] ?? 0) > 0) Pill('${_stats['low_stock']} low on stock', color: AppColors.warning, icon: Icons.trending_down),
+            ]),
+          ),
+          const SizedBox(width: 10),
+          _menuButton<String>(
+            icon: Icons.storefront_outlined,
+            label: _supplier ?? 'All suppliers',
+            onSelected: (v) => setState(() => _supplier = v.isEmpty ? null : v),
+            items: [
+              const PopupMenuItem(value: '', child: Text('All suppliers')),
+              const PopupMenuDivider(),
+              for (final r in _supplierRows)
+                PopupMenuItem(
+                  value: r['name'] as String,
+                  child: Row(children: [
+                    Icon(r['one_off'] == 1 ? Icons.local_shipping_outlined : Icons.storefront_outlined, size: 18),
+                    const SizedBox(width: 10),
+                    Expanded(child: Text(r['name'] as String, overflow: TextOverflow.ellipsis)),
+                  ]),
+                ),
+            ],
+          ),
+          const SizedBox(width: 8),
+          _menuButton<String>(
+            icon: Icons.sort,
+            label: 'Sort: ${_sorts[_sort]}',
+            onSelected: (v) => setState(() => _sort = v),
+            items: [for (final e in _sorts.entries) CheckedPopupMenuItem(value: e.key, checked: _sort == e.key, child: Text(e.value))],
+          ),
         ]),
       ),
+      if (_supplier != null) _supplierSummary(),
       Expanded(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(28, 0, 28, 24),
@@ -163,48 +293,58 @@ class _InventoryPageState extends State<InventoryPage> with DataReload {
                             ? FilledButton.icon(onPressed: _newProduct, icon: const Icon(Icons.add), label: const Text('New medicine'))
                             : null,
                       )
-                    : SimpleTable(
-                        columns: const [
-                          TableCol('Medicine', flex: 3),
-                          TableCol('Form', width: 110),
-                          TableCol('Company', flex: 1.4),
-                          TableCol('Stock', width: 160),
-                          TableCol('Batches', width: 70, right: true),
-                          TableCol('Next expiry', width: 130),
-                          TableCol('MRP', width: 90, right: true),
-                          TableCol('Rack', width: 70),
-                        ],
-                        rowCount: _items.length,
-                        onTap: (i) => showProductDetail(context, _items[i].product.id!),
-                        cells: (i) {
-                          final ps = _items[i];
-                          final p = ps.product;
-                          return [
-                            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                              Row(children: [
-                                Flexible(child: Text(p.name, style: const TextStyle(fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis)),
-                                const SizedBox(width: 6),
-                                RxBadge(p),
+                    : LayoutBuilder(builder: (context, box) {
+                        final shown = _shown;
+                        // Narrow screens (1024×768): form and company go under the name, rack is dropped.
+                        final wide = box.maxWidth >= 1080;
+                        if (shown.isEmpty) {
+                          return EmptyState(icon: Icons.storefront_outlined, title: 'No medicines from ${_supplier ?? 'this supplier'} match');
+                        }
+                        return SimpleTable(
+                          columns: [
+                            const TableCol('Medicine', flex: 3),
+                            if (wide) const TableCol('Form', width: 110),
+                            if (wide) const TableCol('Company', flex: 1.4),
+                            const TableCol('Supplier', flex: 1.7),
+                            TableCol('Stock', width: wide ? 160 : 136),
+                            TableCol('Batches', width: 76, right: true),
+                            TableCol('Next expiry', width: wide ? 130 : 104),
+                            TableCol('MRP', width: wide ? 90 : 80, right: true),
+                            if (wide) const TableCol('Rack', width: 70),
+                          ],
+                          rowCount: shown.length,
+                          onTap: (i) => showProductDetail(context, shown[i].product.id!),
+                          cells: (i) {
+                            final ps = shown[i];
+                            final p = ps.product;
+                            final sub = wide ? p.genericName : [p.genericName, p.manufacturer, p.form].where((e) => e.isNotEmpty).join(' · ');
+                            return [
+                              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                Row(children: [
+                                  Flexible(child: Text(p.name, style: const TextStyle(fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis)),
+                                  const SizedBox(width: 6),
+                                  RxBadge(p),
+                                ]),
+                                if (sub.isNotEmpty) Text(sub, style: TextStyle(fontSize: 12, color: context.muted), overflow: TextOverflow.ellipsis),
                               ]),
-                              if (p.genericName.isNotEmpty)
-                                Text(p.genericName, style: TextStyle(fontSize: 12, color: context.muted), overflow: TextOverflow.ellipsis),
-                            ]),
-                            Text(p.form, style: TextStyle(color: context.muted)),
-                            Text(p.manufacturer, overflow: TextOverflow.ellipsis, style: TextStyle(color: context.muted)),
-                            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                              Text(ps.stockUnits == 0 ? 'Out of stock' : p.qty(ps.stockUnits),
-                                  style: TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                      color: ps.stockUnits == 0 ? AppColors.danger : ps.lowStock ? AppColors.warning : null)),
-                              if (ps.expiredUnits > 0) Text('+ ${p.qty(ps.expiredUnits)} expired', style: const TextStyle(fontSize: 11.5, color: AppColors.danger)),
-                            ]),
-                            Text('${ps.batchCount}'),
-                            ps.nearestExpiry == null ? Text('—', style: TextStyle(color: context.muted)) : ExpiryBadge(ps.nearestExpiry!, small: true),
-                            Text(ps.mrp == null ? '—' : amount(ps.mrp!)),
-                            Text(p.rack.isEmpty ? '—' : p.rack, style: TextStyle(color: context.muted)),
-                          ];
-                        },
-                      ),
+                              if (wide) Text(p.form, style: TextStyle(color: context.muted)),
+                              if (wide) Text(p.manufacturer, overflow: TextOverflow.ellipsis, style: TextStyle(color: context.muted)),
+                              _supplierCell(ps),
+                              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                Text(ps.stockUnits == 0 ? 'Out of stock' : p.qty(ps.stockUnits),
+                                    style: TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                        color: ps.stockUnits == 0 ? AppColors.danger : ps.lowStock ? AppColors.warning : null)),
+                                if (ps.expiredUnits > 0) Text('+ ${p.qty(ps.expiredUnits)} expired', style: const TextStyle(fontSize: 11.5, color: AppColors.danger)),
+                              ]),
+                              Text('${ps.batchCount}'),
+                              ps.nearestExpiry == null ? Text('—', style: TextStyle(color: context.muted)) : ExpiryBadge(ps.nearestExpiry!, small: true),
+                              Text(ps.mrp == null ? '—' : amount(ps.mrp!)),
+                              if (wide) Text(p.rack.isEmpty ? '—' : p.rack, style: TextStyle(color: context.muted)),
+                            ];
+                          },
+                        );
+                      }),
           ),
         ),
       ),
@@ -258,6 +398,12 @@ class _ProductDetailState extends State<_ProductDetail> {
     });
   }
 
+  /// Closes this medicine and shows the supplier's dashboard.
+  void _openSupplier(Supplier s) {
+    Navigator.pop(context);
+    Nav.openSupplier(s);
+  }
+
   /// "from Shree Medical · Inv 123 · 12/11/26" under a batch number; tap opens that supplier's account.
   Widget _originLine(Batch b) {
     final from = _origins.where((o) => o.batchId == b.id).toList();
@@ -269,7 +415,7 @@ class _ProductDetailState extends State<_ProductDetail> {
     return Tooltip(
       message: from.map((x) => '${x.sourceLabel} · ${x.invoiceNo.isEmpty ? 'entry #${x.purchaseId}' : 'Inv ${x.invoiceNo}'} · ${fmtDate(x.date)}').join('\n'),
       child: InkWell(
-        onTap: o.source.name.isEmpty ? null : () => showSupplierAccount(context, o.source),
+        onTap: o.source.name.isEmpty ? null : () => _openSupplier(o.source),
         child: Text(
           'from ${o.sourceLabel} · ${o.invoiceNo.isEmpty ? '' : 'Inv ${o.invoiceNo} · '}${fmtDateShort(o.date)}$more',
           maxLines: 2,
@@ -458,7 +604,7 @@ class _ProductDetailState extends State<_ProductDetail> {
                         rowCount: _origins.length,
                         onTap: (i) {
                           final o = _origins[i];
-                          if (o.source.name.isNotEmpty) showSupplierAccount(context, o.source);
+                          if (o.source.name.isNotEmpty) _openSupplier(o.source);
                         },
                         cells: (i) {
                           final o = _origins[i];

@@ -53,14 +53,60 @@ void main() {
     expect(r['paid_total'], 1200);
     expect(r['remaining'], 300);
 
-    final ledger = await Repo.supplierLedger(sup);
-    expect(ledger.map((e) => e.kind), ['purchase', 'purchase', 'payment']);
-    expect(ledger.last.runningBalance, 300);
-    expect(ledger.first.note, contains('paid at purchase'));
+    final acc = await Repo.supplierAccount(sup);
+    expect(acc.goods, 1500);
+    expect(acc.paid, 1200);
+    expect(acc.remaining, 300);
+    final a2 = acc.bills.first; // newest first
+    expect(a2.label, 'Invoice A2');
+    expect(a2.status, 'Part paid');
+    expect(a2.paid, 200);
+    expect(a2.remaining, 300);
+    expect(a2.payments.single.$1.mode, 'UPI');
+    final a1 = acc.bills.last;
+    expect(a1.status, 'Cleared');
+    expect(a1.paidAtEntry, isTrue);
+    expect(a1.clearedAt, isNotNull);
 
-    await Repo.deleteSupplierPayment(ledger.last.refId);
+    await Repo.deleteSupplierPayment(acc.payments.single.id);
     r = await row('Mahalaxmi Pharma');
     expect(r['remaining'], 500);
+  });
+
+  test('payments clear the oldest bills first; a payment can be for one bill', () async {
+    final sup2 = Supplier(name: 'Ganesh Agencies');
+    await Repo.saveSupplier(sup2);
+    PurchaseItem item(int packs) =>
+        PurchaseItem(productId: tab.id!, productName: 'Pan 40', batchNo: 'G$packs', expiry: DateTime(2029, 1, 31), packSize: 10, qtyPacks: packs, purchaseRate: 100, mrp: 150, gstRate: 0);
+    await Repo.createPurchase(Purchase(supplierId: sup2.id, invoiceNo: 'G1', invoiceDate: DateTime(2026, 9, 1), paid: false), [item(3)]); // 300
+    await Repo.createPurchase(Purchase(supplierId: sup2.id, invoiceNo: 'G2', invoiceDate: DateTime(2026, 10, 1), paid: false), [item(4)]); // 400
+    await Repo.createPurchase(Purchase(supplierId: sup2.id, invoiceNo: 'G3', invoiceDate: DateTime(2026, 11, 1), paid: false), [item(2)]); // 200
+
+    var acc = await Repo.supplierAccount(sup2);
+    final g3 = acc.bills.firstWhere((b) => b.label == 'Invoice G3');
+    await Repo.paySupplier(sup2, 200, mode: 'Cash', purchaseId: g3.purchase.id); // pays G3 exactly
+    await Repo.paySupplier(sup2, 500, mode: 'Cheque', note: 'chq 1234'); // G1 300 + G2 200
+
+    acc = await Repo.supplierAccount(sup2);
+    SupplierBill bill(String l) => acc.bills.firstWhere((b) => b.label == 'Invoice $l');
+    expect(bill('G3').status, 'Cleared');
+    expect(bill('G1').status, 'Cleared');
+    expect(bill('G1').clearedAt, acc.payments.firstWhere((p) => p.mode == 'Cheque').date);
+    // G3 was paid by the earlier Cash payment; cleared on that date even though FIFO ran later.
+    expect(bill('G3').clearedAt, acc.payments.firstWhere((p) => p.mode == 'Cash').date);
+    expect(bill('G2').status, 'Part paid');
+    expect(bill('G2').remaining, 200);
+    expect(acc.openBills, 1);
+    expect(acc.remaining, 200);
+    final chq = acc.payments.firstWhere((p) => p.mode == 'Cheque');
+    expect(chq.appliedTo.map((e) => (e.$1.label, e.$2)), [('Invoice G1', 300.0), ('Invoice G2', 200.0)]);
+
+    // Paying more than owed leaves an advance.
+    await Repo.paySupplier(sup2, 250);
+    acc = await Repo.supplierAccount(sup2);
+    expect(acc.openBills, 0);
+    expect(acc.advance, 50);
+    expect(acc.payments.first.advance, 50);
   });
 
   test('medicines supplied add up across stock entries', () async {
@@ -72,7 +118,7 @@ void main() {
   });
 
   test('each batch knows where it came from', () async {
-    final origins = await Repo.batchOrigins(tab.id!);
+    final origins = (await Repo.batchOrigins(tab.id!)).where((o) => o.source.id == sup.id).toList();
     expect(origins.map((o) => o.batchNo), ['P2', 'P1']); // newest first
     expect(origins.first.source.id, sup.id);
     expect(origins.first.sourceLabel, 'Mahalaxmi Pharma');
@@ -94,7 +140,8 @@ void main() {
     await Repo.paySupplier(shop, 240);
     r = await row('Shree Medical');
     expect(r['remaining'], 0);
-    expect((await Repo.supplierLedger(shop)).last.runningBalance, 0);
+    expect((await Repo.supplierAccount(shop)).remaining, 0);
+    expect((await Repo.supplierAccount(shop)).openBills, 0);
     expect((await Repo.supplierProducts(shop)).single['units'], 30);
     // Saved supplier untouched by the one-off payment.
     expect((await row('Mahalaxmi Pharma'))['remaining'], 500);

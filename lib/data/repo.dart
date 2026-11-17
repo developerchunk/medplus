@@ -356,48 +356,9 @@ class Repo {
     ''', args);
   }
 
-  /// Goods received (stock entries) and money paid to [s], oldest first, with the running
-  /// amount still owed. Entries marked paid at stock entry show as paid straight away.
-  static Future<List<CreditEntry>> supplierLedger(Supplier s) async {
-    final (where, args) = _sourceWhere(s);
-    final purchases = await _db.rawQuery('''
-      SELECT pu.*, (SELECT COUNT(*) FROM purchase_items pi WHERE pi.purchase_id = pu.id) AS item_count
-      FROM purchases pu WHERE $where ORDER BY pu.invoice_date, pu.id
-    ''', args);
-    final pays = s.id != null
-        ? await _db.query('supplier_payments', where: 'supplier_id = ?', whereArgs: [s.id], orderBy: 'created_at')
-        : await _db.query('supplier_payments', where: 'supplier_id IS NULL AND source_name = ? COLLATE NOCASE', whereArgs: [s.name], orderBy: 'created_at');
-    final entries = <CreditEntry>[
-      for (final pu in purchases)
-        CreditEntry(
-          date: DateTime.parse(pu['invoice_date'] as String),
-          kind: 'purchase',
-          refId: pu['id'] as int,
-          label: (pu['invoice_no'] as String? ?? '').isEmpty ? 'Stock entry #${pu['id']}' : 'Invoice ${pu['invoice_no']}',
-          debit: (pu['net_total'] as num).toDouble(),
-          credit: pu['paid'] == 1 ? (pu['net_total'] as num).toDouble() : 0,
-          note: '${pu['item_count']} item${pu['item_count'] == 1 ? '' : 's'}${pu['paid'] == 1 ? ' · paid at purchase' : ''}',
-        ),
-      for (final p in pays)
-        CreditEntry(
-          date: DateTime.parse(p['created_at'] as String),
-          kind: 'payment',
-          refId: p['id'] as int,
-          label: 'Payment · ${p['mode']}',
-          credit: (p['amount'] as num).toDouble(),
-          note: p['note'] as String? ?? '',
-        ),
-    ]..sort((a, b) => a.date.compareTo(b.date));
-    var bal = 0.0;
-    for (final e in entries) {
-      bal = round2(bal + e.debit - e.credit);
-      e.runningBalance = bal;
-    }
-    return entries;
-  }
-
-  /// Money paid to a supplier or one-off shop.
-  static Future<void> paySupplier(Supplier s, double amount, {String mode = 'Cash', String note = ''}) async {
+  /// Money paid to a supplier or one-off shop — for one bill ([purchaseId]) or, when null,
+  /// towards the oldest unpaid bills.
+  static Future<void> paySupplier(Supplier s, double amount, {String mode = 'Cash', String note = '', int? purchaseId}) async {
     if (amount <= 0) throw RepoException('Enter the amount paid');
     await _db.insert('supplier_payments', {
       'supplier_id': s.id,
@@ -406,13 +367,58 @@ class Repo {
       'amount': round2(amount),
       'mode': mode,
       'note': note,
+      'purchase_id': purchaseId,
     });
     notifyDataChanged();
+  }
+
+  /// All bills and payments with [s], with payments shared out over the bills.
+  static Future<SupplierAccount> supplierAccount(Supplier s) async {
+    final (where, args) = _sourceWhere(s);
+    final purchases = await _db.rawQuery('''
+      SELECT pu.*, (SELECT COUNT(*) FROM purchase_items pi WHERE pi.purchase_id = pu.id) AS item_count
+      FROM purchases pu WHERE $where
+    ''', args);
+    final pays = s.id != null
+        ? await _db.query('supplier_payments', where: 'supplier_id = ?', whereArgs: [s.id])
+        : await _db.query('supplier_payments', where: 'supplier_id IS NULL AND source_name = ? COLLATE NOCASE', whereArgs: [s.name]);
+    return SupplierAccount.build(
+      purchases.map(Purchase.fromMap).toList(),
+      [
+        for (final p in pays)
+          SupplierPayment(
+            id: p['id'] as int,
+            date: DateTime.parse(p['created_at'] as String),
+            amount: (p['amount'] as num).toDouble(),
+            mode: p['mode'] as String? ?? 'Cash',
+            note: p['note'] as String? ?? '',
+            purchaseId: p['purchase_id'] as int?,
+          ),
+      ],
+    );
   }
 
   static Future<void> deleteSupplierPayment(int id) async {
     await _db.delete('supplier_payments', where: 'id = ?', whereArgs: [id]);
     notifyDataChanged();
+  }
+
+  /// For every medicine, the suppliers / shops it was bought from, most recent first.
+  static Future<Map<int, List<String>>> productSuppliers() async {
+    final rows = await _db.rawQuery('''
+      SELECT pi.product_id, COALESCE(s.name, NULLIF(pu.source_name, '')) AS source, MAX(pu.invoice_date || pu.created_at) AS last
+      FROM purchase_items pi
+      JOIN purchases pu ON pu.id = pi.purchase_id
+      LEFT JOIN suppliers s ON s.id = pu.supplier_id
+      GROUP BY pi.product_id, source
+      HAVING source IS NOT NULL
+      ORDER BY pi.product_id, last DESC
+    ''');
+    final out = <int, List<String>>{};
+    for (final r in rows) {
+      (out[r['product_id'] as int] ??= []).add(r['source'] as String);
+    }
+    return out;
   }
 
   /// Where each batch of a medicine came from: every stock entry that brought it in, newest first.
@@ -644,7 +650,7 @@ class Repo {
   }
 
   static Future<void> setPurchasePaid(int id, bool paid) async {
-    await _db.update('purchases', {'paid': paid ? 1 : 0}, where: 'id = ?', whereArgs: [id]);
+    await _db.update('purchases', {'paid': paid ? 1 : 0, 'paid_at': paid ? _now : ''}, where: 'id = ?', whereArgs: [id]);
     notifyDataChanged();
   }
 
@@ -672,6 +678,8 @@ class Repo {
             note: 'Purchase entry deleted');
       }
       await txn.delete('batches', where: 'purchase_id = ? AND qty = 0 AND initial_qty <= 0', whereArgs: [id]);
+      // Payments made for this bill now count towards the supplier's other bills.
+      await txn.update('supplier_payments', {'purchase_id': null}, where: 'purchase_id = ?', whereArgs: [id]);
       await txn.delete('purchases', where: 'id = ?', whereArgs: [id]);
     });
     notifyDataChanged();

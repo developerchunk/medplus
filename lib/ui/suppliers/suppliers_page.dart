@@ -7,6 +7,7 @@ import '../../data/repo.dart';
 import '../../models/models.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
+import '../nav.dart';
 import 'supplier_account.dart';
 
 Future<Supplier?> showSupplierForm(BuildContext context, {Supplier? supplier}) =>
@@ -95,6 +96,21 @@ class _SuppliersPageState extends State<SuppliersPage> with DataReload {
   String _query = '';
   List<Map<String, Object?>> _rows = [];
   Timer? _debounce;
+  Supplier? _open; // dashboard being shown
+
+  @override
+  void initState() {
+    super.initState();
+    Nav.pendingSupplier.addListener(_onPending);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _onPending());
+  }
+
+  void _onPending() {
+    final s = Nav.pendingSupplier.value;
+    if (s == null || !mounted) return;
+    Nav.pendingSupplier.value = null;
+    setState(() => _open = s);
+  }
 
   @override
   void reload() async {
@@ -104,32 +120,35 @@ class _SuppliersPageState extends State<SuppliersPage> with DataReload {
 
   @override
   void dispose() {
+    Nav.pendingSupplier.removeListener(_onPending);
     _debounce?.cancel();
     super.dispose();
   }
 
-  Future<void> _open(Supplier s) => showSupplierAccount(
-        context,
-        s,
-        onEdit: () async {
-          Navigator.pop(context);
-          await showSupplierForm(context, supplier: s);
-        },
+  @override
+  Widget build(BuildContext context) {
+    final open = _open;
+    if (open != null) {
+      // A saved supplier may have been edited: show the latest details.
+      final fresh = open.id == null ? open : _rows.where((r) => r['id'] == open.id).map(Supplier.fromMap).firstOrNull ?? open;
+      return SupplierDashboard(
+        key: ValueKey('${open.id}|${open.name}'),
+        supplier: fresh,
+        onBack: () => setState(() => _open = null),
+        onEdit: () => showSupplierForm(context, supplier: fresh),
         onDelete: () async {
           if (!await confirm(context,
-              title: 'Delete ${s.name}?',
+              title: 'Delete ${fresh.name}?',
               message: 'Past stock entries stay, but will no longer show this supplier. Payments recorded to them are removed.',
               confirmLabel: 'Delete',
               destructive: true)) {
             return;
           }
-          await Repo.deleteSupplier(s.id!);
-          if (mounted) Navigator.pop(context);
+          await Repo.deleteSupplier(fresh.id!);
+          if (mounted) setState(() => _open = null);
         },
       );
-
-  @override
-  Widget build(BuildContext context) {
+    }
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       PageHeader(
         title: 'Suppliers',
@@ -170,7 +189,7 @@ class _SuppliersPageState extends State<SuppliersPage> with DataReload {
                       TableCol('Last', width: 92),
                     ],
                     rowCount: _rows.length,
-                    onTap: (i) => _open(Supplier.fromMap(_rows[i])),
+                    onTap: (i) => setState(() => _open = Supplier.fromMap(_rows[i])),
                     cells: (i) {
                       final r = _rows[i];
                       final s = Supplier.fromMap(r);

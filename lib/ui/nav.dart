@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import '../models/models.dart';
+
 /// App-wide navigation state shared by the shell and pages.
 class Nav {
   static const dashboard = 0;
@@ -23,6 +25,9 @@ class Nav {
   /// A customer the billing screen should start a bill for.
   static final pendingCustomer = ValueNotifier<int?>(null);
 
+  /// A supplier (or one-off shop) whose dashboard the Suppliers screen should open.
+  static final pendingSupplier = ValueNotifier<Supplier?>(null);
+
   /// A product the inventory screen should open.
   static final pendingProduct = ValueNotifier<int?>(null);
 
@@ -36,6 +41,11 @@ class Nav {
   static void billForCustomer(int customerId) {
     pendingCustomer.value = customerId;
     page.value = billing;
+  }
+
+  static void openSupplier(Supplier s) {
+    pendingSupplier.value = s;
+    page.value = suppliers;
   }
 
   static void openProduct(int id) {

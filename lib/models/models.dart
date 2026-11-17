@@ -420,6 +420,90 @@ class BatchOrigin {
   String get sourceLabel => source.name.isEmpty ? 'Unknown supplier' : source.name;
 }
 
+/// A payment made to a supplier or one-off shop, and which bills it paid.
+class SupplierPayment {
+  SupplierPayment({required this.id, required this.date, required this.amount, this.mode = 'Cash', this.note = '', this.purchaseId});
+  final int id;
+  final DateTime date;
+  final double amount;
+  final String mode;
+  final String note;
+  final int? purchaseId; // paid for this bill; null = oldest bills first
+  final List<(SupplierBill, double)> appliedTo = [];
+  double advance = 0; // part not needed by any bill yet
+}
+
+/// One supplier bill (stock entry) with how much of it is paid, by which payments, and when it was cleared.
+class SupplierBill {
+  SupplierBill(this.purchase);
+  final Purchase purchase;
+  double paid = 0;
+  final List<(SupplierPayment, double)> payments = [];
+  DateTime? clearedAt;
+
+  double get amount => purchase.netTotal;
+  double get remaining => round2(amount - paid) < 0.005 ? 0 : round2(amount - paid);
+  bool get isCleared => remaining <= 0;
+  bool get paidAtEntry => purchase.paid;
+  String get label => purchase.invoiceNo.isEmpty ? 'Entry #${purchase.id}' : 'Invoice ${purchase.invoiceNo}';
+  String get status => isCleared ? 'Cleared' : (paid > 0.004 ? 'Part paid' : 'Unpaid');
+}
+
+/// Everything about money with one supplier: bills, payments and totals.
+class SupplierAccount {
+  SupplierAccount(this.bills, this.payments);
+  final List<SupplierBill> bills; // newest first
+  final List<SupplierPayment> payments; // newest first
+
+  double get goods => round2(bills.fold(0.0, (t, b) => t + b.amount));
+  double get paid => round2(bills.where((b) => b.paidAtEntry).fold(0.0, (t, b) => t + b.amount) + payments.fold(0.0, (t, p) => t + p.amount));
+  double get remaining => round2(goods - paid);
+  double get advance => remaining < 0 ? -remaining : 0;
+  int get openBills => bills.where((b) => !b.isCleared).length;
+  DateTime? get lastPurchase => bills.isEmpty ? null : bills.first.purchase.invoiceDate;
+  SupplierPayment? get lastPayment => payments.firstOrNull;
+
+  /// Shares out the payments: a payment made for a bill goes to that bill first; everything
+  /// else pays the oldest unpaid bills. A bill is cleared on the date of the payment that finished it.
+  static SupplierAccount build(List<Purchase> purchases, List<SupplierPayment> payments) {
+    final bills = [for (final p in purchases) SupplierBill(p)]
+      ..sort((a, b) => a.purchase.invoiceDate != b.purchase.invoiceDate
+          ? a.purchase.invoiceDate.compareTo(b.purchase.invoiceDate)
+          : (a.purchase.id ?? 0).compareTo(b.purchase.id ?? 0));
+    for (final b in bills) {
+      if (b.paidAtEntry) {
+        b.paid = b.amount;
+        b.clearedAt = b.purchase.paidAt ?? b.purchase.createdAt;
+      }
+    }
+    final pays = [...payments]..sort((a, b) => a.date.compareTo(b.date));
+    final left = <SupplierPayment, double>{for (final p in pays) p: p.amount};
+    void apply(SupplierPayment p, SupplierBill b) {
+      final take = round2(left[p]! < b.remaining ? left[p]! : b.remaining);
+      if (take <= 0) return;
+      left[p] = round2(left[p]! - take);
+      b.paid = round2(b.paid + take);
+      b.payments.add((p, take));
+      p.appliedTo.add((b, take));
+      // Cleared on the date of the latest payment towards it.
+      if (b.isCleared) b.clearedAt = b.payments.map((e) => e.$1.date).reduce((x, y) => x.isAfter(y) ? x : y);
+    }
+
+    for (final p in pays.where((p) => p.purchaseId != null)) {
+      final b = bills.where((b) => b.purchase.id == p.purchaseId).firstOrNull;
+      if (b != null) apply(p, b);
+    }
+    for (final p in pays) {
+      for (final b in bills) {
+        if (left[p]! <= 0) break;
+        if (!b.isCleared) apply(p, b);
+      }
+      p.advance = left[p]!;
+    }
+    return SupplierAccount(bills.reversed.toList(), pays.reversed.toList());
+  }
+}
+
 class CreditEntry {
   final DateTime date;
   final String kind; // bill | payment
@@ -447,6 +531,7 @@ class Purchase {
   double gstTotal;
   double netTotal;
   bool paid;
+  DateTime? paidAt; // when it was marked paid (at stock entry, or later)
   String notes;
   int itemCount;
 
@@ -462,6 +547,7 @@ class Purchase {
     this.gstTotal = 0,
     this.netTotal = 0,
     this.paid = true,
+    this.paidAt,
     this.notes = '',
     this.itemCount = 0,
   }) : createdAt = createdAt ?? DateTime.now();
@@ -478,6 +564,7 @@ class Purchase {
         gstTotal: _d(m['gst_total']),
         netTotal: _d(m['net_total']),
         paid: _i(m['paid']) == 1,
+        paidAt: _date(m['paid_at']),
         notes: _s(m['notes']),
         itemCount: _i(m['item_count']),
       );
@@ -493,6 +580,7 @@ class Purchase {
         'gst_total': gstTotal,
         'net_total': netTotal,
         'paid': paid ? 1 : 0,
+        'paid_at': paid ? isoDateTime(paidAt ?? createdAt) : '',
         'notes': notes,
         // A one-off source (another shop) has no supplier record; keep its name here.
         'source_name': supplierId == null ? supplierName : '',

@@ -44,6 +44,14 @@ void main() {
     ]);
     await Repo.paySupplier(sup, 200, mode: 'UPI');
     await Repo.addOutsideStock(product: pan, sourceName: 'Shree Medical', batchNo: 'SX9', expiry: DateTime(2029, 1, 31), mrp: 150, purchaseRate: 125, units: 6, paid: false);
+    // A second medicine from a different supplier, for sorting / filtering.
+    final city = Supplier(name: 'City Distributors');
+    await Repo.saveSupplier(city);
+    final azee = Product(name: 'Azee 500', packSize: 3);
+    await Repo.saveProduct(azee);
+    await Repo.createPurchase(Purchase(supplierId: city.id, invoiceNo: 'CD-7', invoiceDate: DateTime(2026, 9, 1)), [
+      PurchaseItem(productId: azee.id!, productName: 'Azee 500', batchNo: 'AZ1', expiry: DateTime(2028, 3, 31), packSize: 3, qtyPacks: 4, purchaseRate: 60, mrp: 90, gstRate: 0),
+    ]);
   });
 
   Future<void> settle(WidgetTester t) async {
@@ -80,24 +88,73 @@ void main() {
     expect(find.text('₹300.00'), findsWidgets); // remaining after ₹200 UPI
     await shot(t, 'suppliers_1024');
 
+    // Supplier dashboard (full screen).
     await t.tap(find.text('Mahalaxmi Pharma'));
     await settle(t);
     await waitFor(t, find.text('Remaining to pay'));
-    expect(find.text('Medicines supplied (1)'.toUpperCase()), findsOneWidget);
-    expect(find.text('Payment · UPI'), findsOneWidget);
-    await shot(t, 'supplier_account_1024');
+    expect(find.text('Bills (2)'), findsOneWidget);
+    expect(find.text('Payments (1)'), findsOneWidget);
+    expect(find.text('Medicines (1)'), findsOneWidget);
+    expect(find.text('Part paid'), findsOneWidget); // MP-1088: ₹200 of ₹500 paid
+    expect(find.textContaining('Cleared '), findsOneWidget); // MP-1021 paid at purchase
+    await shot(t, 'supplier_dashboard_1024');
 
-    // Record a payment for the rest.
-    await t.tap(find.text('Record payment'));
+    // Bill detail: payments with dates.
+    await t.tap(find.text('Invoice MP-1088'));
+    await settle(t);
+    await waitFor(t, find.text('PAYMENTS FOR THIS BILL'));
+    expect(find.text('UPI'), findsOneWidget);
+    expect(find.text('Remaining ₹300.00'), findsOneWidget);
+    await shot(t, 'supplier_bill_1024');
+    await t.tap(find.text('Pay ₹300.00'));
     await settle(t);
     await t.tap(find.text('Save payment'));
     await settle(t);
     await t.pump(const Duration(milliseconds: 500));
     await settle(t);
-    expect(find.text('Paid in advance'), findsNothing);
-    expect(find.text('₹0.00'), findsWidgets);
-    await t.tap(find.text('Close'));
+    expect(find.text('All bills cleared'), findsOneWidget);
+    expect(find.text('Part paid'), findsNothing);
+
+    await t.tap(find.text('Payments (2)'));
     await settle(t);
+    expect(find.textContaining('Invoice MP-1088 ₹300.00 (cleared)'), findsOneWidget);
+    await shot(t, 'supplier_payments_1024');
+    await t.tap(find.byTooltip('Back to suppliers'));
+    await settle(t);
+    expect(find.text('New supplier'), findsOneWidget);
+  });
+
+  testWidgets('inventory list: supplier column, filter by supplier with totals, sort by supplier', (t) async {
+    await t.pumpWidget(const MedBillingsApp());
+    await settle(t);
+    Nav.go(Nav.inventory);
+    await settle(t);
+    await waitFor(t, find.text('Azee 500'));
+    expect(find.text('SUPPLIER'), findsOneWidget);
+    expect(find.text('City Distributors'), findsOneWidget);
+    expect(find.text('Shree Medical  +1'), findsOneWidget); // Pan 40: latest from Shree, also Mahalaxmi
+
+    // Sort by supplier: City Distributors (Azee) before Shree Medical (Pan).
+    await t.tap(find.textContaining('Sort: '));
+    await settle(t);
+    await t.tap(find.text('Supplier').last);
+    await settle(t);
+    expect(t.getTopLeft(find.text('Azee 500')).dy, lessThan(t.getTopLeft(find.text('Pan 40')).dy));
+    await shot(t, 'inventory_sorted_1024');
+
+    // Filter to Mahalaxmi Pharma: only Pan 40, with the supplier's money summary.
+    await t.tap(find.text('All suppliers'));
+    await settle(t);
+    await t.tap(find.text('Mahalaxmi Pharma').last);
+    await settle(t);
+    expect(find.text('Azee 500'), findsNothing);
+    expect(find.text('Pan 40'), findsOneWidget);
+    expect(find.text('Goods ₹1,500.00'), findsOneWidget);
+    expect(find.text('Nothing owed'), findsOneWidget); // paid off in the previous test
+    await shot(t, 'inventory_filtered_1024');
+    await t.tap(find.byTooltip('Show all suppliers'));
+    await settle(t);
+    expect(find.text('Azee 500'), findsOneWidget);
   });
 
   testWidgets('inventory shows where each batch came from', (t) async {
