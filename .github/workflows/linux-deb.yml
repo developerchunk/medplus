@@ -1,6 +1,12 @@
 # Builds the Linux installer (medbillings_<version>_amd64.deb) on GitHub's
 # Ubuntu 22.04 machines, so no Linux PC is needed. Built on 22.04 so it runs on
-# Linux Mint 21 and 22. Download it from the run's "Artifacts" section.
+# Linux Mint 21 and 22.
+#
+# - Run it by hand (Actions → Linux installer → Run workflow): the .deb is in the
+#   run's "Artifacts" section.
+# - Push a tag like v1.2.0 (tool/release.sh does this): the .deb is signed with the
+#   release key (secret UPDATE_SIGNING_KEY) and published as a GitHub release.
+#   Installed shop PCs download it and offer "Restart & update".
 name: Linux installer
 
 on:
@@ -8,11 +14,23 @@ on:
   push:
     tags: ['v*']
 
+permissions:
+  contents: write
+
 jobs:
   deb:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+
+      - name: Tag matches pubspec version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          v=$(sed -nE 's/^version:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' pubspec.yaml)
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::pubspec.yaml says $v but the tag is $GITHUB_REF_NAME"
+            exit 1
+          fi
 
       - uses: subosito/flutter-action@v2
         with:
@@ -28,3 +46,30 @@ jobs:
           name: medbillings-linux-deb
           path: dist/*.deb
           if-no-files-found: error
+
+      - name: Sign for auto-update
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "::error::Repository secret UPDATE_SIGNING_KEY is missing"
+            exit 1
+          fi
+          umask 077
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > "$RUNNER_TEMP/key.pem"
+          for f in dist/*.deb; do
+            openssl pkeyutl -sign -inkey "$RUNNER_TEMP/key.pem" -rawin -in "$f" -out "$f.sig"
+            # Same check the shop PC does before installing.
+            openssl pkeyutl -verify -pubin -inkey linux/packaging/update-key.pub -rawin -in "$f" -sigfile "$f.sig"
+          done
+          rm -f "$RUNNER_TEMP/key.pem"
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.deb dist/*.deb.sig \
+            --title "MedBillings ${GITHUB_REF_NAME#v}" \
+            --notes-file <(git log -1 --format=%B HEAD)

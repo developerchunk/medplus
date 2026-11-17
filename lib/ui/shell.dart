@@ -22,6 +22,7 @@ import 'settings/settings_page.dart';
 import 'suppliers/suppliers_page.dart';
 import 'templates/templates_page.dart';
 import 'theme.dart';
+import 'update_ui.dart';
 
 class _NavItem {
   final String label;
@@ -122,13 +123,18 @@ class _AppShellState extends State<AppShell> {
             _sidebar(current),
             VerticalDivider(width: 1, color: context.border),
             Expanded(
-              child: IndexedStack(
-                index: current,
-                children: [
-                  for (var i = 0; i < _items.length; i++)
-                    _built.contains(i) ? TickerMode(enabled: i == current, child: _page(i)) : const SizedBox.shrink(),
-                ],
-              ),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                const UpdateBanner(),
+                Expanded(
+                  child: IndexedStack(
+                    index: current,
+                    children: [
+                      for (var i = 0; i < _items.length; i++)
+                        _built.contains(i) ? TickerMode(enabled: i == current, child: _page(i)) : const SizedBox.shrink(),
+                    ],
+                  ),
+                ),
+              ]),
             ),
           ],
         ),

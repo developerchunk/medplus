@@ -35,7 +35,7 @@ void notifyDataChanged() => dataVersion.value++;
 class AppDb {
   AppDb._();
   static Database? _db;
-  static const schemaVersion = 5;
+  static const schemaVersion = 6;
 
   static Database get db {
     final d = _db;
@@ -85,6 +85,14 @@ class AppDb {
           if (from < 5) {
             // v5: free goods on a box line can be whole boxes.
             await db.execute('ALTER TABLE purchase_items ADD COLUMN free_boxes INTEGER DEFAULT 0');
+          }
+          if (from < 6) {
+            // v6: medicine brought from another shop while billing (a one-off source name
+            // on the purchase, loose units such as 6 tablets of a strip), and item
+            // discounts given in rupees instead of percent.
+            await db.execute("ALTER TABLE purchases ADD COLUMN source_name TEXT DEFAULT ''");
+            await db.execute('ALTER TABLE purchase_items ADD COLUMN loose_units INTEGER DEFAULT 0');
+            await db.execute('ALTER TABLE sale_items ADD COLUMN discount_rs REAL DEFAULT 0');
           }
         },
       ),
@@ -164,7 +172,8 @@ class AppDb {
       gst_total REAL DEFAULT 0,
       net_total REAL DEFAULT 0,
       paid INTEGER DEFAULT 1,
-      notes TEXT DEFAULT ''
+      notes TEXT DEFAULT '',
+      source_name TEXT DEFAULT ''
     )''',
     '''CREATE TABLE batches(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,7 +216,8 @@ class AppDb {
       amount REAL,
       box_qty INTEGER DEFAULT 0,
       box_size INTEGER DEFAULT 0,
-      free_boxes INTEGER DEFAULT 0
+      free_boxes INTEGER DEFAULT 0,
+      loose_units INTEGER DEFAULT 0
     )''',
     '''CREATE TABLE doctors(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -278,7 +288,8 @@ class AppDb {
       gst_rate REAL,
       amount REAL,
       hsn TEXT,
-      rx INTEGER DEFAULT 0
+      rx INTEGER DEFAULT 0,
+      discount_rs REAL DEFAULT 0
     )''',
     'CREATE INDEX idx_sale_items_sale ON sale_items(sale_id)',
     '''CREATE TABLE stock_movements(

@@ -468,6 +468,8 @@ class Purchase {
         'net_total': netTotal,
         'paid': paid ? 1 : 0,
         'notes': notes,
+        // A one-off source (another shop) has no supplier record; keep its name here.
+        'source_name': supplierId == null ? supplierName : '',
       };
 }
 
@@ -491,6 +493,7 @@ class PurchaseItem {
   int boxQty; // > 0 when bought as full boxes (paid boxes)
   int boxSize; // packs (strips) per box for this purchase
   int freeBoxes; // free goods given as whole boxes (already included in freePacks)
+  int looseUnits; // extra single units beyond whole packs (e.g. 6 tablets bought from another shop)
   String packName; // display only (joined from the medicine)
 
   PurchaseItem({
@@ -513,6 +516,7 @@ class PurchaseItem {
     this.boxQty = 0,
     this.boxSize = 0,
     this.freeBoxes = 0,
+    this.looseUnits = 0,
     this.packName = 'Pack',
   }) : saleRate = saleRate ?? mrp;
 
@@ -526,15 +530,16 @@ class PurchaseItem {
             ? ' + $freePacks $packName free'
             : '';
     if (boughtInBoxes) return '$boxQty Box × $boxSize $packName$free';
+    if (looseUnits > 0) return '${qtyPacks > 0 ? '$qtyPacks $packName + ' : ''}$looseUnits loose$free';
     return '$qtyPacks $packName$free';
   }
 
-  double get gross => qtyPacks * purchaseRate;
+  double get gross => (qtyPacks + (packSize > 0 ? looseUnits / packSize : 0)) * purchaseRate;
   double get discount => gross * discountPct / 100;
   double get taxable => gross - discount;
   double get gst => taxable * gstRate / 100;
   double get total => taxable + gst;
-  int get totalUnits => (qtyPacks + freePacks) * packSize;
+  int get totalUnits => (qtyPacks + freePacks) * packSize + looseUnits;
 
   factory PurchaseItem.fromMap(Map<String, Object?> m) => PurchaseItem(
         id: m['id'] as int?,
@@ -556,6 +561,7 @@ class PurchaseItem {
         boxQty: _i(m['box_qty']),
         boxSize: _i(m['box_size']),
         freeBoxes: _i(m['free_boxes']),
+        looseUnits: _i(m['loose_units']),
         packName: m['pack_name'] as String? ?? 'Pack',
       );
 
@@ -580,6 +586,7 @@ class PurchaseItem {
         'box_qty': boxQty,
         'box_size': boxSize,
         'free_boxes': freeBoxes,
+        'loose_units': looseUnits,
       };
 }
 
@@ -601,6 +608,7 @@ class SaleItem {
   double mrp; // per pack
   double unitRate; // per unit, GST inclusive
   double discountPct;
+  double discountRs; // > 0 when the discount was given in rupees (discountPct is then derived)
   double gstRate;
   double amount; // after discount, GST inclusive
   String hsn;
@@ -622,11 +630,15 @@ class SaleItem {
     required this.mrp,
     required this.unitRate,
     this.discountPct = 0,
+    this.discountRs = 0,
     this.gstRate = 0,
     this.amount = 0,
     this.hsn = '',
     this.rx = false,
   });
+
+  /// How the item discount prints: "10%" or "₹15".
+  String get discountLabel => discountRs > 0 ? '₹${trimNum(discountRs)}' : (discountPct > 0 ? '${trimNum(discountPct)}%' : '');
 
   double get gross => qtyUnits * unitRate;
   String get qtyLabel => fmtQty(qtyUnits, packSize, unitName, packName);
@@ -647,6 +659,7 @@ class SaleItem {
         mrp: _d(m['mrp']),
         unitRate: _d(m['unit_rate']),
         discountPct: _d(m['discount_pct']),
+        discountRs: _d(m['discount_rs']),
         gstRate: _d(m['gst_rate']),
         amount: _d(m['amount']),
         hsn: _s(m['hsn']),
@@ -669,6 +682,7 @@ class SaleItem {
         'mrp': mrp,
         'unit_rate': unitRate,
         'discount_pct': discountPct,
+        'discount_rs': discountRs,
         'gst_rate': gstRate,
         'amount': amount,
         'hsn': hsn,

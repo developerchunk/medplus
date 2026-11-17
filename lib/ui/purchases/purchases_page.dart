@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../core/unsaved_work.dart';
 import '../../core/format.dart';
 import '../../core/settings.dart';
 import '../../data/repo.dart';
@@ -10,6 +11,7 @@ import '../../models/models.dart';
 import '../bills/bills_page.dart' show RangeFilter, RangePreset;
 import '../inventory/product_form.dart';
 import '../suppliers/suppliers_page.dart' show showSupplierForm;
+import '../nav.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
 import '../widgets/date_input.dart';
@@ -254,7 +256,25 @@ class _PurchaseEntryState extends State<PurchaseEntry> {
   static final _monthYearDone = RegExp(r'^\d\d/\d\d$');
 
   @override
+  void initState() {
+    super.initState();
+    // Asked before the app restarts for an update.
+    UnsavedWork.register(this, () {
+      final typing = _prodCtrl.text.trim().isNotEmpty || _supplierCtrl.text.trim().isNotEmpty || _invoice.text.trim().isNotEmpty;
+      if (_items.isEmpty && !typing) return null;
+      return PendingWork(
+        where: 'Stock Entry',
+        message: _items.isEmpty
+            ? 'A stock entry has been started but not saved. Save it or close it.'
+            : 'A stock entry with ${_items.length} item${_items.length == 1 ? '' : 's'} is not saved yet. Save it or close it.',
+        page: Nav.purchases,
+      );
+    });
+  }
+
+  @override
   void dispose() {
+    UnsavedWork.unregister(this);
     for (final c in [_supplierCtrl, _invoice, _notes, _dateCtrl, _prodCtrl, _batch, _mfg, _exp, _qty, _free, _rate, _mrp, _disc]) {
       c.dispose();
     }

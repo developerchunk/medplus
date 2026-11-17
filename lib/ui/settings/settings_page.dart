@@ -13,6 +13,7 @@ import '../../core/settings.dart';
 import '../../data/repo.dart';
 import '../../models/models.dart';
 import '../theme.dart';
+import '../update_ui.dart';
 import '../widgets/common.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -310,6 +311,9 @@ class _SettingsPageState extends State<SettingsPage> with EnterFlow {
                 _field('expiry_warn_days', 'Remind me this many days before expiry', type: TextInputType.number),
                 _field('expiry_critical_days', 'Mark as urgent within (days)', type: TextInputType.number),
               ]),
+            ]),
+            _section('App updates', 'New versions install from GitHub with one restart', Icons.system_update_alt, [
+              const UpdateSettingsCard(),
             ]),
             _section('Appearance', 'Light or dark look', Icons.palette_outlined, [
               Align(

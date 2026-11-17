@@ -49,9 +49,41 @@ before each release; installing a newer `.deb` upgrades in place.
 If the desktop icon shows "Untrusted application launcher", click
 **Mark executable** / **Launch anyway** once. It won't ask again.
 
+## Automatic updates
+
+From version 1.1.0 the app updates itself from the GitHub releases of
+`developerchunk/medplus`:
+
+- About 30 seconds after it opens, and every 6 hours, it checks for a newer
+  release and downloads it in the background (internet needed only for this).
+- A blue bar then says **"A new version … is ready"** → **Restart & update**.
+  The same button is in **Settings → App updates** (with "Check for updates").
+- If a bill or stock entry is half-filled, it asks to save or clear it first.
+  Everything else is already saved. MedBillings closes, installs the update and
+  opens again by itself. No password is asked.
+- Only updates signed with the release key are installed, and only newer ones.
+
+The shop PC must get **1.1.0 once by pen drive** (versions before it can't update
+themselves). After that, every release arrives on its own.
+
+### Publishing a new version (on the Mac)
+
+```bash
+tool/release.sh patch "What changed, in one line"
+```
+
+`patch` = small fix (1.1.0 → 1.1.1), `minor` = new feature (1.1.0 → 1.2.0). The
+script bumps the version, commits, tags and pushes; GitHub builds, signs and
+publishes the release in about 10 minutes.
+
+The signing key lives in `~/.config/medbillings-release/update-signing-key.pem`
+on the Mac and in the repository secret `UPDATE_SIGNING_KEY`. **Back up that
+file.** If it's lost, shop PCs refuse new updates until a version with a new
+public key (`linux/packaging/update-key.pub`) is installed once by pen drive.
+
 ## Updating or removing
 
-- **Update**: double-click the newer `.deb` → Install. Data stays.
+- **Update by pen drive** (if there's no internet): double-click the newer `.deb` → Install. Data stays.
 - **Remove**: `sudo apt remove medbillings`. Data in Documents/MedBillings stays.
 - **Turn off auto-open**: Start menu → Session and Startup → Application
   Autostart → untick MedBillings.

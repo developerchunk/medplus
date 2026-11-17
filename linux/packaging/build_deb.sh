@@ -78,6 +78,14 @@ for size in 128 256 512; do
   cp "$HERE/icons/$size.png" "$dir/$APP_ID.png"
 done
 
+# Auto-update: root helper (runs through pkexec), the release public key, and the
+# polkit rule that lets the logged-in user run the helper without a password.
+mkdir -p "$STAGE/opt/$PKG/updater" "$STAGE/usr/share/polkit-1/actions"
+cp "$HERE/medbillings-update" "$STAGE/opt/$PKG/updater/"
+chmod 755 "$STAGE/opt/$PKG/updater/medbillings-update"
+cp "$HERE/update-key.pub" "$STAGE/opt/$PKG/updater/"
+cp "$HERE/$APP_ID.update.policy" "$STAGE/usr/share/polkit-1/actions/"
+
 # Open at login (the shop PC should land straight in billing)
 CONFFILES=""
 if [ "$AUTOSTART" = 1 ]; then
@@ -96,9 +104,9 @@ cat > "$STAGE/DEBIAN/control" <<EOF
 Package: $PKG
 Version: $DEB_VERSION
 Architecture: amd64
-Maintainer: MedBillings <duosagesdev@gmail.com>
+Maintainer: MedBillings <medbillings@localhost>
 Installed-Size: $INSTALLED_KB
-Depends: libgtk-3-0t64 | libgtk-3-0, zenity, xdg-user-dirs, xdg-utils
+Depends: libgtk-3-0t64 | libgtk-3-0, zenity, xdg-user-dirs, xdg-utils, pkexec | policykit-1, openssl
 Recommends: cups
 Section: misc
 Priority: optional

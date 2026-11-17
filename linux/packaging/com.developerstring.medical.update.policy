@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  Lets the person logged in at the shop PC install MedBillings updates from the app
+  without typing a password. The helper only installs .deb files signed with the
+  MedBillings release key that are newer than the installed version.
+-->
+<policyconfig>
+  <vendor>MedBillings</vendor>
+  <action id="com.developerstring.medical.update">
+    <description>Install a MedBillings update</description>
+    <message>MedBillings needs permission to install an update</message>
+    <icon_name>com.developerstring.medical</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/opt/medbillings/updater/medbillings-update</annotate>
+  </action>
+</policyconfig>

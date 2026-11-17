@@ -342,7 +342,13 @@ class Repo {
     pu.discountTotal = round2(items.fold(0.0, (s, i) => s + i.discount));
     pu.gstTotal = round2(items.fold(0.0, (s, i) => s + i.gst));
     pu.netTotal = round2(items.fold(0.0, (s, i) => s + i.total));
-    final id = await _db.transaction((txn) async {
+    final id = await _db.transaction((txn) => _insertPurchase(txn, pu, items));
+    notifyDataChanged();
+    return id;
+  }
+
+  /// Writes a purchase, its items and their batches/stock movements inside [txn].
+  static Future<int> _insertPurchase(Transaction txn, Purchase pu, List<PurchaseItem> items) async {
       final purchaseId = await txn.insert('purchases', pu.toMap()..remove('id'));
       final label = pu.invoiceNo.isEmpty ? 'Purchase #$purchaseId' : 'Inv ${pu.invoiceNo}';
       for (final it in items) {
@@ -393,17 +399,87 @@ class Repo {
             productId: it.productId, batchId: batchId, type: 'PURCHASE', qty: units, refType: 'purchase', refId: purchaseId, refLabel: label);
       }
       return purchaseId;
+  }
+
+  /// Saved suppliers plus one-off sources typed earlier (e.g. another medical shop
+  /// a medicine was brought from), for the "brought from" field.
+  static Future<List<Supplier>> purchaseSources(String query, {int limit = 12}) async {
+    final saved = await searchSuppliers(query, limit: limit);
+    final rows = await _db.rawQuery('''
+      SELECT source_name, MAX(created_at) AS last FROM purchases
+      WHERE supplier_id IS NULL AND source_name != '' AND source_name LIKE ?
+      GROUP BY source_name COLLATE NOCASE ORDER BY last DESC LIMIT ?
+    ''', ['%${query.trim()}%', limit]);
+    final names = saved.map((s) => s.name.toLowerCase()).toSet();
+    return [
+      ...saved,
+      for (final r in rows)
+        if (!names.contains((r['source_name'] as String).toLowerCase())) Supplier(name: r['source_name'] as String, notes: 'one-off'),
+    ];
+  }
+
+  /// Medicine brought from another shop while billing. Records it as a small
+  /// purchase (from a saved [supplier] or a one-off [sourceName]) so it gets a batch
+  /// the bill can sell from; whatever isn't sold stays in stock.
+  /// A new [product] (id == null) is created first.
+  static Future<Batch> addOutsideStock({
+    required Product product,
+    Supplier? supplier,
+    String sourceName = '',
+    required String batchNo,
+    required DateTime expiry,
+    required double mrp, // per pack
+    double purchaseRate = 0, // per pack, what the shop paid
+    required int units,
+    bool paid = true,
+    String note = '',
+  }) async {
+    if (units <= 0) throw RepoException('Enter how much was brought');
+    final packSize = product.packSize < 1 ? 1 : product.packSize;
+    final item = PurchaseItem(
+      productId: product.id ?? 0,
+      productName: product.name,
+      batchNo: batchNo.trim().isEmpty ? 'OUT${DateTime.now().millisecondsSinceEpoch % 100000}' : batchNo.trim().toUpperCase(),
+      expiry: expiry,
+      packSize: packSize,
+      qtyPacks: units ~/ packSize,
+      looseUnits: units % packSize,
+      purchaseRate: purchaseRate,
+      mrp: mrp,
+      gstRate: Settings.instance.gstEnabled ? product.gstRate : 0,
+      packName: product.packName,
+    );
+    final source = supplier?.name ?? sourceName.trim();
+    final pu = Purchase(
+      supplierId: supplier?.id,
+      supplierName: source.isEmpty ? 'Outside purchase' : source,
+      invoiceDate: today(),
+      grossTotal: round2(item.gross),
+      gstTotal: round2(item.gst),
+      netTotal: round2(item.total),
+      paid: paid,
+      notes: note.isEmpty ? 'Brought for a bill' : note,
+    );
+    final batchId = await _db.transaction((txn) async {
+      if (product.id == null) {
+        final map = product.toMap()..remove('id');
+        map['created_at'] = _now;
+        product.id = await txn.insert('products', map);
+        item.productId = product.id!;
+      }
+      await _insertPurchase(txn, pu, [item]);
+      return item.batchId!;
     });
     notifyDataChanged();
-    return id;
+    return (await batch(batchId))!;
   }
 
   static Future<List<Purchase>> purchases({String query = '', int? supplierId, DateTime? from, DateTime? to}) async {
     final where = <String>[];
     final args = <Object?>[];
     if (query.trim().isNotEmpty) {
-      where.add('(pu.invoice_no LIKE ? OR s.name LIKE ?)');
-      args.addAll(['%${query.trim()}%', '%${query.trim()}%']);
+      where.add('(pu.invoice_no LIKE ? OR s.name LIKE ? OR pu.source_name LIKE ?)');
+      args.addAll(['%${query.trim()}%', '%${query.trim()}%', '%${query.trim()}%']);
     }
     if (supplierId != null) {
       where.add('pu.supplier_id = ?');
@@ -418,7 +494,7 @@ class Repo {
       args.add(isoDate(to));
     }
     final rows = await _db.rawQuery('''
-      SELECT pu.*, COALESCE(s.name, '—') AS supplier_name,
+      SELECT pu.*, COALESCE(s.name, NULLIF(pu.source_name, ''), '—') AS supplier_name,
         (SELECT COUNT(*) FROM purchase_items pi WHERE pi.purchase_id = pu.id) AS item_count
       FROM purchases pu LEFT JOIN suppliers s ON s.id = pu.supplier_id
       ${where.isEmpty ? '' : 'WHERE ${where.join(' AND ')}'}
@@ -445,7 +521,7 @@ class Repo {
     await _db.transaction((txn) async {
       final items = await txn.query('purchase_items', where: 'purchase_id = ?', whereArgs: [id]);
       for (final it in items) {
-        final units = ((it['qty_packs'] as int) + (it['free_packs'] as int)) * (it['pack_size'] as int);
+        final units = ((it['qty_packs'] as int) + (it['free_packs'] as int)) * (it['pack_size'] as int) + ((it['loose_units'] as int?) ?? 0);
         final b = await txn.query('batches', where: 'id = ?', whereArgs: [it['batch_id']]);
         if (b.isEmpty) continue;
         final qty = b.first['qty'] as int;

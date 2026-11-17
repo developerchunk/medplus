@@ -8,6 +8,7 @@ import '../../core/bill_file.dart';
 import '../../core/format.dart';
 import '../../core/print_service.dart';
 import '../../core/settings.dart';
+import '../../core/unsaved_work.dart';
 import '../../data/repo.dart';
 import '../../models/models.dart';
 import '../bills/bill_viewer.dart';
@@ -16,10 +17,11 @@ import '../nav.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
 import '../widgets/suggest_field.dart';
+import 'outside_stock_dialog.dart';
 
 /// One medicine line on the bill being prepared.
 class BillLine {
-  BillLine({required this.product, required this.batches, this.batch, required int qty, double disc = 0})
+  BillLine({required this.product, required this.batches, this.batch, required int qty, double disc = 0, this.discRs = false})
       : qty = qty,
         disc = disc,
         qtyCtrl = TextEditingController(text: '$qty'),
@@ -30,7 +32,8 @@ class BillLine {
   List<Batch> batches;
   Batch? batch;
   int qty; // in units (tablets, vials, bottles…)
-  double disc;
+  double disc; // percent, or rupees when [discRs]
+  bool discRs;
   final TextEditingController qtyCtrl;
   final TextEditingController discCtrl;
   final TextEditingController batchCtrl;
@@ -40,7 +43,13 @@ class BillLine {
 
   double get unitRate => batch?.unitRate ?? 0;
   double get gross => round2(qty * unitRate);
-  double get amount => round2(qty * unitRate * (1 - disc / 100));
+  double get amount => discRs ? round2(math.max(0, gross - disc)) : round2(qty * unitRate * (1 - disc / 100));
+
+  /// Rupees off this line (a rupee discount can't exceed the line value).
+  double get discRupees => discRs ? math.min(disc, gross) : round2(gross - amount);
+
+  /// The discount as a percent, for the bill record (derived for rupee discounts).
+  double get discPct => discRs ? (gross > 0 ? round2(discRupees / gross * 100) : 0) : disc;
   double get gstRate => batch?.gstRate ?? product.gstRate;
 
   void dispose() {
@@ -92,6 +101,7 @@ class _BillingPageState extends State<BillingPage> {
   List<Batch> _selBatches = [];
   Batch? _selBatch;
   int _qtyMode = 0; // 0 = loose units, 1 = packs (strips), 2 = outer packs (boxes)
+  bool _discRs = false; // entry-row discount typed in rupees instead of percent
   String? _entryError;
 
   // template & summary
@@ -101,11 +111,13 @@ class _BillingPageState extends State<BillingPage> {
   final _receivedCtrl = TextEditingController();
   final _paidNowCtrl = TextEditingController();
   String _payment = 'Cash';
+  bool _billDiscRs = false; // extra discount typed in rupees instead of percent
   Customer? _customer; // picked from suggestions (credit badge, balance)
   Doctor? _defaultDoctor;
   String _templateCode = '';
 
   final List<BillLine> _lines = [];
+  final _tableScroll = ScrollController();
   bool _saving = false;
   Sale? _lastSale;
   Timer? _clock;
@@ -116,6 +128,7 @@ class _BillingPageState extends State<BillingPage> {
     Nav.pendingTemplate.addListener(_onPendingTemplate);
     Nav.pendingCustomer.addListener(_onPendingCustomer);
     Settings.instance.addListener(_onSettings);
+    UnsavedWork.register(this, _pendingWork);
     _batchFocus.addListener(_onEntryBatchFocus);
     _clock = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) setState(() {});
@@ -133,7 +146,9 @@ class _BillingPageState extends State<BillingPage> {
     Nav.pendingTemplate.removeListener(_onPendingTemplate);
     Nav.pendingCustomer.removeListener(_onPendingCustomer);
     Settings.instance.removeListener(_onSettings);
+    UnsavedWork.unregister(this);
     _clock?.cancel();
+    _tableScroll.dispose();
     for (final c in [_custName, _custPhone, _custAddr, _docName, _docReg, _docClinic, _rxNotes, _prodCtrl, _batchCtrl, _qtyCtrl, _discCtrl, _tplCtrl, _billDiscCtrl, _receivedCtrl, _paidNowCtrl]) {
       c.dispose();
     }
@@ -171,6 +186,23 @@ class _BillingPageState extends State<BillingPage> {
         _docClinic.text = d?.clinic ?? '';
       }
     });
+  }
+
+  /// What's still unsaved on this bill (asked before the app restarts for an update).
+  PendingWork? _pendingWork() {
+    final started = _lines.isNotEmpty ||
+        _prodCtrl.text.trim().isNotEmpty ||
+        _custName.text.trim().isNotEmpty ||
+        _custPhone.text.trim().isNotEmpty ||
+        _rxNotes.text.trim().isNotEmpty;
+    if (!started) return null;
+    final bad = _lines.where((l) => _lineError(l) != null).length;
+    final n = _lines.length;
+    final msg = n == 0
+        ? 'A bill has been started (patient or medicine typed) but not saved. Save it or clear it (Ctrl+N).'
+        : 'A bill with $n medicine${n == 1 ? '' : 's'} is not saved yet'
+            '${bad > 0 ? ' — $bad line${bad == 1 ? ' needs' : 's need'} a batch or quantity' : ''}. Save it or clear it (Ctrl+N).';
+    return PendingWork(where: 'New Bill', message: msg, page: Nav.billing);
   }
 
   bool get _isDefaultDoctor => _defaultDoctor != null && _docName.text.trim().toLowerCase() == _defaultDoctor!.name.toLowerCase();
@@ -220,11 +252,14 @@ class _BillingPageState extends State<BillingPage> {
 
   // ---------------------------------------------------------------- totals
 
-  double get _billDiscPct => parseNum(_billDiscCtrl.text).clamp(0, 100).toDouble();
   double get _gross => round2(_lines.fold(0.0, (s, l) => s + l.gross));
   double get _net1 => round2(_lines.fold(0.0, (s, l) => s + l.amount));
   double get _itemDisc => round2(_gross - _net1);
-  double get _billDisc => round2(_net1 * _billDiscPct / 100);
+  double get _billDiscInput => parseNum(_billDiscCtrl.text);
+  double get _billDisc => _billDiscRs ? round2(math.min(_billDiscInput, _net1)) : round2(_net1 * _billDiscInput.clamp(0, 100) / 100);
+
+  /// The extra discount as a percent of the bill (derived when it was given in rupees).
+  double get _billDiscPct => _net1 > 0 ? _billDisc / _net1 * 100 : 0;
   double get _net2 => round2(_net1 - _billDisc);
   double get _grand => _net2.roundToDouble();
   double get _roundOff => round2(_grand - _net2);
@@ -267,11 +302,14 @@ class _BillingPageState extends State<BillingPage> {
       _entryError = null;
     });
     if (batches.isEmpty) {
+      final why = ps.expiredUnits > 0 ? 'Only expired stock left for ${ps.product.name}.' : '${ps.product.name} is out of stock.';
       setState(() {
         _selBatch = null;
-        _entryError = ps.expiredUnits > 0 ? 'Only expired stock left for ${ps.product.name}.' : '${ps.product.name} is out of stock.';
+        _entryError = why;
       });
       _prodCtrl.selection = TextSelection(baseOffset: 0, extentOffset: _prodCtrl.text.length);
+      // Out of stock: it was probably brought from another shop for this bill.
+      await _bringOutside(product: ps.product, reason: '$why Brought it from another shop? Enter it here.');
       return;
     }
     // First-expiry-first-out: preselect the earliest-expiring batch that still has free stock.
@@ -287,7 +325,12 @@ class _BillingPageState extends State<BillingPage> {
     setState(() {
       _selBatch = b;
       _batchCtrl.text = b.batchNo;
-      _discCtrl.text = b.discountPct > 0 ? trimNum(b.discountPct) : '';
+      if (b.discountPct > 0) {
+        _discRs = false;
+        _discCtrl.text = trimNum(b.discountPct);
+      } else {
+        _discCtrl.text = '';
+      }
       _entryError = b.qty - _usedInLines(b.id!) <= 0 ? 'Batch ${b.batchNo} is fully used in this bill already.' : null;
     });
   }
@@ -373,21 +416,81 @@ class _BillingPageState extends State<BillingPage> {
     final free = b.qty - _usedInLines(b.id!);
     if (qty > free) {
       setState(() => _entryError = 'Only ${ps.product.qty(free)} available in batch ${b.batchNo}.');
-      _qtyFocus.requestFocus();
+      _shortfall(ps.product, b, qty, free);
       return;
     }
-    final disc = parseNum(_discCtrl.text).clamp(0, 100).toDouble();
-    // Same batch already on the bill → just increase its quantity.
-    final existing = _lines.where((l) => l.batch?.id == b.id && l.disc == disc).firstOrNull;
+    _addLine(ps.product, _selBatches, b, qty);
+    _resetEntry();
+  }
+
+  double get _entryDisc => _discRs ? parseNum(_discCtrl.text) : parseNum(_discCtrl.text).clamp(0, 100).toDouble();
+
+  /// Puts [qty] of [b] on the bill with the entry row's discount.
+  void _addLine(Product p, List<Batch> batches, Batch b, int qty) {
+    final disc = _entryDisc;
+    // Same batch and same percent discount already on the bill → just increase its quantity.
+    final existing = _lines.where((l) => l.batch?.id == b.id && l.disc == disc && l.discRs == _discRs && (!_discRs || disc == 0)).firstOrNull;
     setState(() {
       if (existing != null) {
         existing.qty += qty;
         existing.qtyCtrl.text = '${existing.qty}';
       } else {
-        _lines.add(BillLine(product: ps.product, batches: _selBatches, batch: b, qty: qty, disc: disc));
+        _lines.add(BillLine(product: p, batches: batches, batch: b, qty: qty, disc: disc, discRs: _discRs));
       }
     });
+  }
+
+  /// More asked for than the batch holds: offer to enter what was brought from outside.
+  Future<void> _shortfall(Product p, Batch b, int qty, int free) async {
+    final have = free < 0 ? 0 : free;
+    final short = qty - have;
+    final ok = await _bringOutside(
+      product: p,
+      needUnits: short,
+      reason: 'Only ${p.qty(have)} in stock — enter the ${p.qty(short)} brought from another shop.',
+      keepEntry: true,
+    );
+    if (!ok || !mounted) {
+      _qtyFocus.requestFocus();
+      return;
+    }
+    if (have > 0) _addLine(p, _selBatches, b, have);
     _resetEntry();
+  }
+
+  // ---------------------------------------------------------------- brought from outside
+
+  /// Medicine brought from another shop (new, out of stock or short): records it
+  /// as stock and puts it on the bill. Returns true when something was added.
+  Future<bool> _bringOutside({Product? product, String name = '', int needUnits = 0, String reason = '', bool keepEntry = false}) async {
+    final r = await showOutsideStockDialog(context, product: product, name: name, needUnits: needUnits, reason: reason);
+    if (r == null || !mounted) {
+      if (product == null) _prodFocus.requestFocus();
+      return false;
+    }
+    final batches = await Repo.batchesForProduct(r.product.id!, sellableOnly: true);
+    if (!mounted) return false;
+    final batch = batches.where((x) => x.id == r.batch.id).firstOrNull ?? r.batch;
+    _addLine(r.product, batches.isEmpty ? [batch] : batches, batch, r.billUnits);
+    if (!keepEntry) _resetEntry();
+    showSnack(context, '${r.product.name}: ${r.product.qty(r.billUnits)} added to the bill (batch ${r.batch.batchNo})');
+    return true;
+  }
+
+  /// A template line that couldn't be stocked: enter what was brought for it.
+  Future<void> _bringOutsideForLine(BillLine l) async {
+    final r = await showOutsideStockDialog(context,
+        product: l.product, needUnits: l.qty > 0 ? l.qty : 0, reason: '${l.product.name} is out of stock — enter what was brought from another shop.');
+    if (r == null || !mounted) return;
+    final batches = await Repo.batchesForProduct(r.product.id!, sellableOnly: true);
+    if (!mounted) return;
+    setState(() {
+      l.batches = batches.isEmpty ? [r.batch] : batches;
+      l.batch = l.batches.firstWhere((x) => x.id == r.batch.id, orElse: () => r.batch);
+      l.batchCtrl.text = l.batch!.batchNo;
+      l.qty = r.billUnits;
+      l.qtyCtrl.text = '${r.billUnits}';
+    });
   }
 
   // ---------------------------------------------------------------- templates
@@ -533,7 +636,7 @@ class _BillingPageState extends State<BillingPage> {
       }
     }
     setState(() => _saving = true);
-    final pct = _billDiscPct;
+    final pct = _billDiscRs ? round2(_billDiscPct) : _billDiscInput.clamp(0, 100).toDouble();
     final sale = Sale(
       customerName: _custName.text.trim(),
       customerPhone: _custPhone.text.trim(),
@@ -568,7 +671,8 @@ class _BillingPageState extends State<BillingPage> {
             qtyUnits: l.qty,
             mrp: l.batch!.mrp,
             unitRate: round2(l.unitRate * 10000) / 10000,
-            discountPct: l.disc,
+            discountPct: l.discPct,
+            discountRs: l.discRs ? l.discRupees : 0,
             gstRate: _lineGst(l),
             amount: l.amount,
             hsn: l.product.hsn,
@@ -646,24 +750,32 @@ class _BillingPageState extends State<BillingPage> {
         const SingleActivator(LogicalKeyboardKey.f4): () => _tplFocus.requestFocus(),
         const SingleActivator(LogicalKeyboardKey.f6): () => _custFocus.requestFocus(),
         const SingleActivator(LogicalKeyboardKey.f7): () => _docFocus.requestFocus(),
+        const SingleActivator(LogicalKeyboardKey.f8): () => _bringOutside(name: _selProduct == null ? _prodCtrl.text : ''),
         const SingleActivator(LogicalKeyboardKey.keyN, control: true): _newBill,
         const SingleActivator(LogicalKeyboardKey.keyN, meta: true): _newBill,
       },
       child: FocusTraversalGroup(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
-          child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            Expanded(
-              child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                _partiesCard(),
-                const SizedBox(height: 12),
-                Expanded(child: _itemsCard()),
-              ]),
-            ),
-            const SizedBox(width: 16),
-            SizedBox(width: MediaQuery.sizeOf(context).width < 1360 ? 290 : 320, child: _summaryPanel()),
-          ]),
-        ),
+        child: LayoutBuilder(builder: (context, box) {
+          // Small shop screens (1024–1366 px): tighter gutters and a narrower summary
+          // so the medicine table keeps room for names.
+          final w = box.maxWidth;
+          final gap = w < 1000 ? 10.0 : 16.0;
+          final summary = w >= 1240 ? 320.0 : (w >= 1000 ? 280.0 : 252.0);
+          return Padding(
+            padding: EdgeInsets.fromLTRB(gap, gap - 2, gap, gap - 2),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  _partiesCard(),
+                  SizedBox(height: gap * 0.75),
+                  Expanded(child: _itemsCard()),
+                ]),
+              ),
+              SizedBox(width: gap),
+              SizedBox(width: summary, child: _summaryPanel()),
+            ]),
+          );
+        }),
       ),
     );
   }
@@ -839,30 +951,50 @@ class _BillingPageState extends State<BillingPage> {
   // ---------------------------------------------------------------- items
 
   Widget _itemsCard() {
+    Widget table() => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      _linesHeader(),
+      const Divider(),
+      Expanded(
+        child: _lines.isEmpty
+            ? EmptyState(
+                icon: Icons.medication_outlined,
+                title: 'No medicines yet',
+                message: 'Type a medicine name above (F3) — pick it, confirm the batch, enter quantity and press Enter. '
+                    'Or load a template (F4). Brought from another shop? Press F8.',
+              )
+            : ListView.separated(
+                itemCount: _lines.length,
+                separatorBuilder: (_, _) => const Divider(height: 1),
+                itemBuilder: (_, i) => _lineRow(i),
+              ),
+      ),
+    ]);
     return Card(
       clipBehavior: Clip.antiAlias,
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         Container(
           color: context.cs.surfaceContainerLow,
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+          padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
           child: _entryRow(),
         ),
         const Divider(),
-        _linesHeader(),
-        const Divider(),
         Expanded(
-          child: _lines.isEmpty
-              ? EmptyState(
-                  icon: Icons.medication_outlined,
-                  title: 'No medicines yet',
-                  message: 'Type a medicine name above (F3) — pick it, confirm the batch, enter quantity and press Enter. '
-                      'Or load a template (F4).',
-                )
-              : ListView.separated(
-                  itemCount: _lines.length,
-                  separatorBuilder: (_, _) => const Divider(height: 1),
-                  itemBuilder: (_, i) => _lineRow(i),
-                ),
+          child: LayoutBuilder(builder: (context, box) {
+            // Small screens get narrower columns (expiry moves under the medicine name).
+            // Never squeeze the medicine column below a readable width: scroll sideways instead.
+            _compactTable = box.maxWidth < _tableMinWidth;
+            final min = _compactTable ? _compactMinWidth : _tableMinWidth;
+            if (box.maxWidth >= min) return table();
+            return Scrollbar(
+              controller: _tableScroll,
+              thumbVisibility: true,
+              child: SingleChildScrollView(
+                controller: _tableScroll,
+                scrollDirection: Axis.horizontal,
+                child: SizedBox(width: min, child: table()),
+              ),
+            );
+          }),
         ),
       ]),
     );
@@ -876,11 +1008,7 @@ class _BillingPageState extends State<BillingPage> {
     final modeNames = p == null ? const <String>[] : [p.unitName, if (packSize > 1) p.packName, if (p.hasOuter) p.outerName];
     final modeValues = p == null ? const <int>[] : [0, if (packSize > 1) 1, if (p.hasOuter) 2];
     final warn = p?.warningText ?? '';
-    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Expanded(
-          flex: 5,
-          child: SuggestField<ProductStock>(
+    final medicine = SuggestField<ProductStock>(
             controller: _prodCtrl,
             focusNode: _prodFocus,
             label: 'Medicine (F3)',
@@ -913,16 +1041,18 @@ class _BillingPageState extends State<BillingPage> {
               child: Row(children: [
                 Icon(Icons.search_off, color: context.muted),
                 const SizedBox(width: 10),
-                const Expanded(child: Text('No medicine found. Add it in Inventory → New medicine, or via Stock Entry.')),
+                const Expanded(child: Text('Not in the medicine list. Brought it from another shop?')),
+                const SizedBox(width: 10),
+                FilledButton.tonalIcon(
+                  onPressed: () => _bringOutside(name: _prodCtrl.text),
+                  icon: const Icon(Icons.local_shipping_outlined, size: 18),
+                  label: const Text('Add brought medicine (F8)'),
+                ),
               ]),
             ),
             itemBuilder: (c, ps, hi) => _productTile(ps),
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          flex: 2,
-          child: SuggestField<Batch>(
+          );
+    final batch = SuggestField<Batch>(
             controller: _batchCtrl,
             focusNode: _batchFocus,
             label: 'Batch',
@@ -959,61 +1089,98 @@ class _BillingPageState extends State<BillingPage> {
                 if (mounted) setState(() => _entryError = msg);
               }
             },
-          ),
+          );
+    final qty = SizedBox(
+      width: 112,
+      child: TextField(
+        controller: _qtyCtrl,
+        focusNode: _qtyFocus,
+        enabled: _selBatch != null,
+        decoration: InputDecoration(
+          labelText: 'Qty',
+          hintText: '1',
+          suffixText: p == null ? null : switch (_qtyMode) { 2 => p.outerName, 1 => p.packName, _ => p.unitName },
         ),
-        const SizedBox(width: 10),
-        SizedBox(
-          width: 118,
-          child: TextField(
-            controller: _qtyCtrl,
-            focusNode: _qtyFocus,
-            enabled: _selBatch != null,
-            decoration: InputDecoration(
-              labelText: 'Qty',
-              hintText: '1',
-              suffixText: p == null ? null : switch (_qtyMode) { 2 => p.outerName, 1 => p.packName, _ => p.unitName },
-            ),
-            inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.a-zA-Z ]'))],
-            onSubmitted: (_) => _discFocus.requestFocus(),
-          ),
+        inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.a-zA-Z ]'))],
+        onSubmitted: (_) => _discFocus.requestFocus(),
+      ),
+    );
+    final toggle = !showToggle
+        ? null
+        : SegmentedButton<int>(
+            showSelectedIcon: false,
+            style: const ButtonStyle(visualDensity: VisualDensity.compact),
+            segments: [for (var i = 0; i < modeValues.length; i++) ButtonSegment(value: modeValues[i], label: Text(modeNames[i]))],
+            selected: {modeValues.contains(_qtyMode) ? _qtyMode : 0},
+            onSelectionChanged: (s) {
+              setState(() => _qtyMode = s.first);
+              _focusNextFrame(_qtyFocus);
+            },
+          );
+    final disc = SizedBox(
+      width: 96,
+      child: TextField(
+        controller: _discCtrl,
+        focusNode: _discFocus,
+        enabled: _selBatch != null,
+        decoration: InputDecoration(
+          labelText: 'Disc',
+          hintText: '0',
+          suffixIcon: _discToggle(_discRs, () => setState(() => _discRs = !_discRs), enabled: _selBatch != null),
+          suffixIconConstraints: const BoxConstraints(minWidth: 28, minHeight: 24),
         ),
-        if (showToggle) ...[
-          const SizedBox(width: 6),
-          Padding(
-            padding: const EdgeInsets.only(top: 2),
-            child: SegmentedButton<int>(
-              showSelectedIcon: false,
-              segments: [for (var i = 0; i < modeValues.length; i++) ButtonSegment(value: modeValues[i], label: Text(modeNames[i]))],
-              selected: {modeValues.contains(_qtyMode) ? _qtyMode : 0},
-              onSelectionChanged: (s) {
-                setState(() => _qtyMode = s.first);
-                _focusNextFrame(_qtyFocus);
-              },
-            ),
-          ),
-        ],
-        const SizedBox(width: 10),
-        SizedBox(
-          width: 78,
-          child: TextField(
-            controller: _discCtrl,
-            focusNode: _discFocus,
-            enabled: _selBatch != null,
-            decoration: const InputDecoration(labelText: 'Disc', suffixText: '%'),
-            inputFormatters: decimalInput,
-            onSubmitted: (_) => _addEntry(),
-          ),
-        ),
-        const SizedBox(width: 10),
-        Padding(
-          padding: const EdgeInsets.only(top: 1),
-          child: FilledButton.icon(
-            onPressed: _selBatch == null ? null : _addEntry,
-            icon: const Icon(Icons.add, size: 18),
-            label: const Text('Add'),
-          ),
-        ),
-      ]),
+        inputFormatters: decimalInput,
+        onSubmitted: (_) => _addEntry(),
+      ),
+    );
+    final add = FilledButton.icon(
+      onPressed: _selBatch == null ? null : _addEntry,
+      icon: const Icon(Icons.add, size: 18),
+      label: const Text('Add'),
+    );
+    final outside = Tooltip(
+      message: 'Medicine brought from another shop (F8)',
+      child: OutlinedButton.icon(
+        onPressed: () => _bringOutside(name: _selProduct == null ? _prodCtrl.text : ''),
+        icon: const Icon(Icons.local_shipping_outlined, size: 18),
+        label: const Text('Outside'),
+      ),
+    );
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      LayoutBuilder(builder: (context, box) {
+        const g = SizedBox(width: 10);
+        // Narrow screens: the medicine search gets its own line, the rest goes below it.
+        if (box.maxWidth < 900) {
+          return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: medicine), g, outside]),
+            const SizedBox(height: 10),
+            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Expanded(child: batch),
+              g,
+              qty,
+              if (toggle != null) ...[const SizedBox(width: 6), toggle],
+              g,
+              disc,
+              g,
+              add,
+            ]),
+          ]);
+        }
+        return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Expanded(flex: 5, child: medicine),
+          g,
+          Expanded(flex: 2, child: batch),
+          g,
+          qty,
+          if (toggle != null) ...[const SizedBox(width: 6), toggle],
+          g,
+          disc,
+          g,
+          add,
+          const SizedBox(width: 8),
+          outside,
+        ]);
+      }),
       if (p != null || _entryError != null) ...[
         const SizedBox(height: 8),
         Wrap(spacing: 8, runSpacing: 6, crossAxisAlignment: WrapCrossAlignment.center, children: [
@@ -1086,28 +1253,73 @@ class _BillingPageState extends State<BillingPage> {
     // label, fixed width, flex, right-aligned
     ('#', 28, 0, false),
     ('Medicine', null, 5, false),
-    ('Batch', 132, 0, false),
-    ('Exp', 66, 0, false),
-    ('Qty', 128, 0, false),
+    ('Batch', 124, 0, false),
+    ('Exp', 64, 0, false),
+    ('Qty', 124, 0, false),
     ('MRP / Rate', 84, 0, true),
-    ('Disc %', 64, 0, true),
-    ('Amount', 84, 0, true),
+    ('Disc', 94, 0, true),
+    ('Amount', 86, 0, true),
     ('', 36, 0, false),
   ];
 
+  /// Same columns for small screens; width 0 hides a column (expiry shows under the name).
+  static const _colsCompact = <(String, double?, int, bool)>[
+    ('#', 24, 0, false),
+    ('Medicine', null, 5, false),
+    ('Batch', 104, 0, false),
+    ('Exp', 0, 0, false),
+    ('Qty', 104, 0, false),
+    ('MRP', 72, 0, true),
+    ('Disc', 86, 0, true),
+    ('Amount', 78, 0, true),
+    ('', 32, 0, false),
+  ];
+
+  /// Below this the compact columns are used (fixed columns + 190 px for the medicine name).
+  static final double _tableMinWidth = _cols.fold<double>(0, (s, c) => s + (c.$2 ?? 0)) + 190 + 22;
+
+  /// Below this even the compact table scrolls sideways.
+  static final double _compactMinWidth = _colsCompact.fold<double>(0, (s, c) => s + (c.$2 ?? 0)) + 150 + 22;
+
+  bool _compactTable = false;
+  List<(String, double?, int, bool)> get _activeCols => _compactTable ? _colsCompact : _cols;
+
   Widget _cell(int i, Widget child) {
-    final c = _cols[i];
+    final c = _activeCols[i];
+    if (c.$2 == 0) return const SizedBox.shrink();
     final w = Align(alignment: c.$4 ? Alignment.centerRight : Alignment.centerLeft, child: child);
     final padded = Padding(padding: const EdgeInsets.symmetric(horizontal: 5), child: w);
     return c.$2 != null ? SizedBox(width: c.$2, child: padded) : Expanded(flex: c.$3, child: padded);
   }
+
+  /// The %/₹ switch inside a discount field: click to flip how the number is read.
+  Widget _discToggle(bool rs, VoidCallback onTap, {bool enabled = true}) => Tooltip(
+        message: rs ? 'Discount in rupees · click for percent' : 'Discount in percent · click for rupees',
+        child: ExcludeFocus(
+          child: InkWell(
+            onTap: enabled ? onTap : null,
+            borderRadius: BorderRadius.circular(6),
+            child: Container(
+              width: 26,
+              height: 24,
+              margin: const EdgeInsets.only(right: 4),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(color: enabled ? context.cs.primary.withValues(alpha: 0.1) : null, borderRadius: BorderRadius.circular(6)),
+              child: Text(rs ? '₹' : '%', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: enabled ? context.cs.primary : context.muted)),
+            ),
+          ),
+        ),
+      );
 
   Widget _linesHeader() {
     final style = TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: context.muted, letterSpacing: 0.4);
     return Container(
       color: context.cs.surfaceContainer,
       padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
-      child: Row(children: [for (var i = 0; i < _cols.length; i++) _cell(i, Text(_cols[i].$1.toUpperCase(), style: style))]),
+      child: Row(children: [
+        for (var i = 0; i < _activeCols.length; i++)
+          _cell(i, Text(_activeCols[i].$1.toUpperCase(), style: style, maxLines: 1, softWrap: false, overflow: TextOverflow.fade)),
+      ]),
     );
   }
 
@@ -1131,9 +1343,23 @@ class _BillingPageState extends State<BillingPage> {
             Row(children: [
               if (err == null && p.needsPrescription) ...[RxBadge(p), const SizedBox(width: 6)],
               Flexible(
-                child: Text(err ?? [p.form, if (l.batch != null && l.batch!.packSize > 1) '${l.batch!.packSize} ${p.unitName}/${p.packName}'].join(' · '),
+                child: Text(
+                    err ??
+                        [
+                          if (_compactTable && l.batch != null) 'Exp ${fmtExpiry(l.batch!.expiry)}',
+                          p.form,
+                          if (l.batch != null && l.batch!.packSize > 1) '${l.batch!.packSize} ${p.unitName}/${p.packName}',
+                        ].join(' · '),
                     style: TextStyle(fontSize: 11.5, color: err != null ? AppColors.danger : context.muted), maxLines: 1, overflow: TextOverflow.ellipsis),
               ),
+              if (l.batch == null && l.batches.isEmpty) ...[
+                const SizedBox(width: 6),
+                InkWell(
+                  onTap: () => _bringOutsideForLine(l),
+                  child: const Text('Add brought stock',
+                      style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: AppColors.info, decoration: TextDecoration.underline)),
+                ),
+              ],
             ]),
           ]),
         ),
@@ -1186,7 +1412,7 @@ class _BillingPageState extends State<BillingPage> {
           4,
           Row(children: [
             SizedBox(
-              width: 54,
+              width: 60,
               child: TextField(
                 controller: l.qtyCtrl,
                 focusNode: l.qtyFocus,
@@ -1227,15 +1453,25 @@ class _BillingPageState extends State<BillingPage> {
         _cell(
           6,
           SizedBox(
-            width: 56,
+            width: _compactTable ? 76 : 84,
             child: TextField(
               controller: l.discCtrl,
               focusNode: l.discFocus,
               textAlign: TextAlign.right,
               onSubmitted: (_) => _prodFocus.requestFocus(),
-              decoration: const InputDecoration(contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 9), hintText: '0'),
+              decoration: InputDecoration(
+                contentPadding: const EdgeInsets.fromLTRB(8, 9, 0, 9),
+                hintText: '0',
+                suffixIcon: _discToggle(
+                    l.discRs,
+                    () => setState(() {
+                          l.discRs = !l.discRs;
+                          l.disc = l.discRs ? parseNum(l.discCtrl.text) : parseNum(l.discCtrl.text).clamp(0, 100).toDouble();
+                        })),
+                suffixIconConstraints: const BoxConstraints(minWidth: 28, minHeight: 24),
+              ),
               inputFormatters: decimalInput,
-              onChanged: (v) => setState(() => l.disc = parseNum(v).clamp(0, 100).toDouble()),
+              onChanged: (v) => setState(() => l.disc = l.discRs ? parseNum(v) : parseNum(v).clamp(0, 100).toDouble()),
             ),
           ),
         ),
@@ -1382,19 +1618,24 @@ class _BillingPageState extends State<BillingPage> {
               Text('Extra discount', style: TextStyle(color: context.muted)),
               const Spacer(),
               SizedBox(
-                width: 84,
+                width: 104,
                 child: TextField(
                   controller: _billDiscCtrl,
                   focusNode: _billDiscFocus,
                   textAlign: TextAlign.right,
                   onSubmitted: (_) => _afterBillDiscount(),
                   inputFormatters: decimalInput,
-                  decoration: const InputDecoration(suffixText: '%', hintText: '0', contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 9)),
+                  decoration: InputDecoration(
+                    hintText: '0',
+                    contentPadding: const EdgeInsets.fromLTRB(10, 9, 0, 9),
+                    suffixIcon: _discToggle(_billDiscRs, () => setState(() => _billDiscRs = !_billDiscRs)),
+                    suffixIconConstraints: const BoxConstraints(minWidth: 28, minHeight: 24),
+                  ),
                   onChanged: (_) => setState(() {}),
                 ),
               ),
             ]),
-            if (_billDisc > 0) row('', '- ${money(_billDisc)}', color: AppColors.success),
+            if (_billDisc > 0) row(_billDiscRs ? '(${trimNum(round2(_billDiscPct))}% of bill)' : '', '- ${money(_billDisc)}', color: AppColors.success),
             if (_gstOn) ...[
               row('Taxable amount', money(_taxable)),
               row('GST (included)', money(_gst)),
@@ -1431,7 +1672,7 @@ class _BillingPageState extends State<BillingPage> {
                 ),
                 const SizedBox(width: 10),
                 SizedBox(
-                  width: 110,
+                  width: 96,
                   child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
                     Text('On credit', style: TextStyle(fontSize: 11.5, color: context.muted)),
                     Text(money(_creditDue), style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15, color: AppColors.warning)),
@@ -1461,7 +1702,7 @@ class _BillingPageState extends State<BillingPage> {
                 ),
                 const SizedBox(width: 10),
                 SizedBox(
-                  width: 110,
+                  width: 96,
                   child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
                     Text('Return', style: TextStyle(fontSize: 11.5, color: context.muted)),
                     Text(received > 0 ? money(change) : '—',

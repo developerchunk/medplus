@@ -171,7 +171,7 @@ class BillPdf {
         it.qtyLabel,
         amount(it.mrp),
         amount(it.unitRate),
-        it.discountPct > 0 ? '${trimNum(it.discountPct)}%' : '',
+        it.discountLabel,
         if (gst) '${trimNum(it.gstRate)}%',
         amount(it.amount),
       ]);
@@ -316,7 +316,7 @@ class BillPdf {
       dash(),
       for (final it in s.items) ...[
         pw.Text('${it.productName}${it.rx ? ' (Rx)' : ''}', style: pw.TextStyle(fontSize: f, fontWeight: pw.FontWeight.bold)),
-        lr('  B:${it.batchNo} E:${fmtExpiry(it.expiry)}  ${it.qtyLabel}${it.discountPct > 0 ? ' -${trimNum(it.discountPct)}%' : ''}', amount(it.amount)),
+        lr('  B:${it.batchNo} E:${fmtExpiry(it.expiry)}  ${it.qtyLabel}${it.discountLabel.isEmpty ? '' : ' -${it.discountLabel}'}', amount(it.amount)),
       ],
       dash(),
       if (showGst) ...[

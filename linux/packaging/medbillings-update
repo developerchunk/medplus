@@ -1,0 +1,49 @@
+#!/bin/sh
+# Installs a MedBillings update downloaded by the app.
+#
+# Run as root through pkexec; the polkit policy (com.developerstring.medical.update)
+# lets the logged-in shop user do this without a password. Because of that it
+# installs ONLY a .deb that
+#   - is signed with the MedBillings release key (update-key.pub, Ed25519),
+#   - is the medbillings package for amd64, and
+#   - is newer than the version already installed.
+#
+# Usage: medbillings-update FILE.deb FILE.deb.sig
+# Exit codes: 0 installed, 2 usage, 3 bad signature, 4 not MedBillings, 5 not newer, other = apt failure
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+KEY=/opt/medbillings/updater/update-key.pub
+
+[ "$#" -eq 2 ] || { echo "usage: medbillings-update FILE.deb FILE.deb.sig" >&2; exit 2; }
+[ -f "$1" ] && [ -f "$2" ] || { echo "update file not found" >&2; exit 2; }
+
+# Work on root-owned copies so the files can't be swapped after they are checked.
+WORK=$(mktemp -d /tmp/medbillings-update.XXXXXX)
+trap 'rm -rf "$WORK"' EXIT INT TERM
+cp -- "$1" "$WORK/update.deb"
+cp -- "$2" "$WORK/update.sig"
+
+if ! openssl pkeyutl -verify -pubin -inkey "$KEY" -rawin -in "$WORK/update.deb" -sigfile "$WORK/update.sig" >/dev/null 2>&1; then
+  echo "signature check failed: not an official MedBillings update" >&2
+  exit 3
+fi
+
+pkg=$(dpkg-deb -f "$WORK/update.deb" Package)
+arch=$(dpkg-deb -f "$WORK/update.deb" Architecture)
+ver=$(dpkg-deb -f "$WORK/update.deb" Version)
+if [ "$pkg" != medbillings ] || [ "$arch" != amd64 ]; then
+  echo "not a MedBillings package ($pkg $arch)" >&2
+  exit 4
+fi
+cur=$(dpkg-query -W -f='${Version}' medbillings 2>/dev/null || echo 0)
+if ! dpkg --compare-versions "$ver" gt "$cur"; then
+  echo "version $ver is not newer than installed $cur" >&2
+  exit 5
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+chmod 0644 "$WORK/update.deb"
+chmod 0755 "$WORK"
+apt-get install -y --no-install-recommends "$WORK/update.deb"
+echo "MedBillings updated to $ver"
